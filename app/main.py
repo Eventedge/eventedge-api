@@ -9,6 +9,7 @@ from fastapi import FastAPI, Query
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 
+from .fear_greed import get_fear_greed
 from .snapshots import (
     extract_funding,
     extract_global,
@@ -189,20 +190,25 @@ def asset_card(symbol: str):
 
 @app.get("/api/v1/sentiment/fear-greed")
 def fear_greed():
-    payload = {
-        "ts": now_iso(),
-        "current": {"value": 50, "label": "Neutral"},
-        "history": [
-            {"t": "D-6", "v": 46},
-            {"t": "D-5", "v": 52},
-            {"t": "D-4", "v": 58},
-            {"t": "D-3", "v": 55},
-            {"t": "D-2", "v": 49},
-            {"t": "D-1", "v": 51},
-            {"t": "Now", "v": 50},
-        ],
-    }
-    return json_with_cache(payload, "public, s-maxage=60, stale-while-revalidate=600")
+    parsed, source_ts = get_fear_greed(max_age_seconds=300)
+    if not parsed:
+        parsed = {
+            "ts": now_iso(),
+            "current": {"value": 50, "label": "Neutral"},
+            "history": [
+                {"t": "D-6", "v": 46},
+                {"t": "D-5", "v": 52},
+                {"t": "D-4", "v": 58},
+                {"t": "D-3", "v": 55},
+                {"t": "D-2", "v": 49},
+                {"t": "D-1", "v": 51},
+                {"t": "Now", "v": 50},
+            ],
+            "source": {"provider": "fallback"},
+        }
+    if source_ts:
+        parsed["source_ts"] = source_ts
+    return json_with_cache(parsed, "public, s-maxage=60, stale-while-revalidate=600")
 
 
 @app.get("/api/v1/edge/supercard")
