@@ -11,6 +11,7 @@ from fastapi.responses import JSONResponse
 
 from .fear_greed import get_fear_greed
 from .paper import build_paper_summary
+from .regime import build_regime
 from .supercard import build_supercard
 from .snapshots import (
     extract_funding,
@@ -244,24 +245,25 @@ def edge_supercard(symbol: str = Query("BTC")):
 
 @app.get("/api/v1/edge/regime")
 def edge_regime():
-    payload = {
-        "ts": now_iso(),
-        "version": "v0.1-placeholder",
-        "regime": {
-            "label": "—",
-            "confidence": "—",
-            "since": None,
-        },
-        "axes": [
-            {"key": "trend", "label": "Trend", "value": "—"},
-            {"key": "volatility", "label": "Volatility", "value": "—"},
-            {"key": "leverage", "label": "Leverage", "value": "—"},
-            {"key": "liquidity", "label": "Liquidity", "value": "—"},
-        ],
-        "drivers": ["—", "—", "—"],
-        "disclaimer": "Placeholder response. This will be computed from HiveMind rollups + HiveBank features.",
-    }
-    return json_with_cache(payload, "public, s-maxage=20, stale-while-revalidate=300")
+    try:
+        payload = build_regime()
+        payload["ts"] = now_iso()
+        return json_with_cache(payload, "public, s-maxage=20, stale-while-revalidate=300")
+    except Exception:
+        payload = {
+            "ts": now_iso(),
+            "version": "v0.1-placeholder",
+            "regime": {"label": "—", "confidence": "—", "since": None},
+            "axes": [
+                {"key": "trend", "label": "Trend", "value": "—"},
+                {"key": "volatility", "label": "Volatility", "value": "—"},
+                {"key": "leverage", "label": "Leverage", "value": "—"},
+                {"key": "liquidity", "label": "Liquidity", "value": "—"},
+            ],
+            "drivers": ["—", "—", "—"],
+            "disclaimer": "Fallback placeholder. Upstream snapshots unavailable.",
+        }
+        return json_with_cache(payload, "public, s-maxage=20, stale-while-revalidate=300")
 
 
 @app.get("/api/v1/paper/summary")
