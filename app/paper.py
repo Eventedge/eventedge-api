@@ -4,11 +4,36 @@ from __future__ import annotations
 
 import datetime as dt
 import logging
-from typing import Any, Dict
+from typing import Any, Dict, List, Optional
 
 from .db import get_conn
+from .snapshots import fmt_usd
 
 logger = logging.getLogger(__name__)
+
+
+def _downsample(points: List[Dict[str, Any]], max_pts: int = 60) -> List[Dict[str, Any]]:
+    if len(points) <= max_pts:
+        return points
+    step = max(1, len(points) // max_pts)
+    out = points[::step]
+    if out and points[-1] != out[-1]:
+        out[-1] = points[-1]
+    return out[:max_pts]
+
+
+def _max_drawdown(vals: List[float]) -> Optional[float]:
+    if not vals:
+        return None
+    peak = vals[0]
+    mdd = 0.0
+    for v in vals:
+        if v > peak:
+            peak = v
+        dd = (peak - v) / peak if peak > 0 else 0.0
+        if dd > mdd:
+            mdd = dd
+    return mdd * 100.0
 
 
 def build_paper_summary() -> Dict[str, Any]:
@@ -17,7 +42,7 @@ def build_paper_summary() -> Dict[str, Any]:
 
     payload: Dict[str, Any] = {
         "ts": now.isoformat(),
-        "version": "v0.2-live",
+        "version": "v0.3-live",
         "accounts": {"active": 0, "tracked": 0},
         "kpis": {
             "equity_30d": "\u2014",
@@ -65,5 +90,52 @@ def build_paper_summary() -> Dict[str, Any]:
             if total_trades > 0:
                 wr = (wins / total_trades) * 100.0
                 payload["kpis"]["win_rate"] = f"{wr:.0f}% ({wins}W / {losses}L / {total_trades})"
+
+            # --- equity curve + drawdown ---
+            curve: List[Dict[str, Any]] = []
+
+            # Primary: pt_equity_snapshots (daily total equity across accounts)
+            cur.execute(
+                """
+                SELECT bucket_ts::date AS d, sum(equity_usd)::float AS eq
+                FROM pt_equity_snapshots
+                WHERE bucket_ts >= %s
+                GROUP BY 1
+                ORDER BY 1 ASC
+                """,
+                (since_30d,),
+            )
+            rows = cur.fetchall()
+            if rows:
+                curve = [{"t": str(d), "v": round(eq, 2)} for d, eq in rows]
+
+            # Fallback: cumulative PnL from paper_trades
+            if not curve:
+                cur.execute(
+                    """
+                    SELECT created_at::date AS d, sum(net_pnl_usdt)::float AS pnl
+                    FROM paper_trades
+                    WHERE created_at >= %s
+                    GROUP BY 1
+                    ORDER BY 1 ASC
+                    """,
+                    (since_30d,),
+                )
+                rows = cur.fetchall()
+                if rows:
+                    cum = 0.0
+                    for d, pnl in rows:
+                        cum += float(pnl or 0.0)
+                        curve.append({"t": str(d), "v": round(cum, 2)})
+
+            if curve:
+                curve = _downsample(curve)
+                payload["sample"]["name"] = "30d equity"
+                payload["sample"]["equity_curve"] = curve
+                payload["kpis"]["equity_30d"] = fmt_usd(curve[-1]["v"])
+                eq_vals = [float(p["v"]) for p in curve]
+                mdd = _max_drawdown(eq_vals)
+                if mdd is not None:
+                    payload["kpis"]["max_drawdown"] = f"{mdd:.1f}%"
 
     return payload
