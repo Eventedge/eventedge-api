@@ -10,6 +10,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 
 from .fear_greed import get_fear_greed
+from .supercard import build_supercard
 from .snapshots import (
     extract_funding,
     extract_global,
@@ -213,30 +214,31 @@ def fear_greed():
 
 @app.get("/api/v1/edge/supercard")
 def edge_supercard(symbol: str = Query("BTC")):
-    sym = (symbol or "BTC").upper()
-    if sym not in ("BTC", "ETH"):
-        sym = "BTC"
-    payload = {
-        "ts": now_iso(),
-        "symbol": sym,
-        "version": "v0.1-placeholder",
-        "summary": {
-            "headline": "—",
-            "stance": "—",
-            "confidence": "—",
-            "notes": ["—", "—", "—"],
-        },
-        "pillars": [
-            {"key": "flow", "label": "Flow", "value": "—", "status": "neutral", "hint": "net flow / pressure"},
-            {"key": "leverage", "label": "Leverage", "value": "—", "status": "neutral", "hint": "OI + funding stress"},
-            {"key": "fragility", "label": "Fragility", "value": "—", "status": "neutral", "hint": "liq imbalance + spikes"},
-            {"key": "momentum", "label": "Momentum", "value": "—", "status": "neutral", "hint": "trend + volatility"},
-            {"key": "sentiment", "label": "Sentiment", "value": "—", "status": "neutral", "hint": "positioning / chatter"},
-            {"key": "risk", "label": "Risk", "value": "—", "status": "neutral", "hint": "regime + confidence"},
-        ],
-        "disclaimer": "Placeholder response. Values will be wired to EventEdge bot outputs and HiveMind rollups.",
-    }
-    return json_with_cache(payload, "public, s-maxage=20, stale-while-revalidate=300")
+    try:
+        payload = build_supercard(symbol)
+        payload["ts"] = now_iso()
+        return json_with_cache(payload, "public, s-maxage=20, stale-while-revalidate=300")
+    except Exception:
+        # Hard fallback to previous stable placeholder schema (never 500)
+        sym = (symbol or "BTC").upper()
+        if sym not in ("BTC", "ETH"):
+            sym = "BTC"
+        payload = {
+            "ts": now_iso(),
+            "symbol": sym,
+            "version": "v0.1-placeholder",
+            "summary": {"headline": "—", "stance": "—", "confidence": "—", "notes": ["—", "—", "—"]},
+            "pillars": [
+                {"key": "flow", "label": "Flow", "value": "—", "status": "neutral", "hint": "pressure proxy"},
+                {"key": "leverage", "label": "Leverage", "value": "—", "status": "neutral", "hint": "OI + funding stress"},
+                {"key": "fragility", "label": "Fragility", "value": "—", "status": "neutral", "hint": "liq imbalance + spikes"},
+                {"key": "momentum", "label": "Momentum", "value": "—", "status": "neutral", "hint": "trend + volatility"},
+                {"key": "sentiment", "label": "Sentiment", "value": "—", "status": "neutral", "hint": "fear/greed"},
+                {"key": "risk", "label": "Risk", "value": "—", "status": "neutral", "hint": "regime + confidence"},
+            ],
+            "disclaimer": "Fallback placeholder. Upstream snapshots unavailable.",
+        }
+        return json_with_cache(payload, "public, s-maxage=20, stale-while-revalidate=300")
 
 
 @app.get("/api/v1/edge/regime")
