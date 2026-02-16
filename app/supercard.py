@@ -164,7 +164,7 @@ def build_supercard(symbol: str) -> Dict[str, Any]:
         "key": "fragility",
         "label": "Fragility",
         "value": (
-            f"{fmt_pct(liq_long_pct, 0)} long / {fmt_pct(liq_short_pct, 0)} short"
+            f"{fmt_pct(liq_long_pct, 0, signed=False)} long / {fmt_pct(liq_short_pct, 0, signed=False)} short"
             if has_frag else "—"
         ),
         "status": _status(frag_bkt),
@@ -220,7 +220,7 @@ def build_supercard(symbol: str) -> Dict[str, Any]:
         "key": "risk",
         "label": "Risk",
         "value": (
-            f"OI {fmt_pct(oi_chg24)} \u2022 BTC dom {fmt_pct(btc_dom, 1)}"
+            f"OI {fmt_pct(oi_chg24)} \u2022 BTC dom {fmt_pct(btc_dom, 1, signed=False)}"
             if has_risk else "—"
         ),
         "status": _status(risk_bkt),
