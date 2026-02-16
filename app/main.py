@@ -12,6 +12,7 @@ from fastapi.responses import JSONResponse
 from .fear_greed import get_fear_greed
 from .paper import build_paper_summary
 from .regime import build_regime
+from .alerts import build_alerts_live
 from .simlab import build_simlab_overview, build_simlab_trades_live
 from .supercard import build_supercard
 from .snapshots import (
@@ -313,4 +314,14 @@ def simlab_trades_live(limit: int = 50):
         return json_with_cache(payload, "public, s-maxage=5, stale-while-revalidate=30")
     except Exception:
         payload = {"ts": now_iso(), "version": "v0.1", "admin": {"tg_id": 0}, "items": [], "disclaimer": "Fallback: trades feed unavailable."}
+        return json_with_cache(payload, "public, s-maxage=5, stale-while-revalidate=30")
+
+
+@app.get("/api/v1/alerts/live")
+def alerts_live(limit: int = 50):
+    try:
+        payload = build_alerts_live(limit=limit)
+        return json_with_cache(payload, "public, s-maxage=5, stale-while-revalidate=30")
+    except Exception:
+        payload = {"ok": True, "version": "v0.1-live", "source_ts": now_iso(), "items": []}
         return json_with_cache(payload, "public, s-maxage=5, stale-while-revalidate=30")
