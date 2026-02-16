@@ -1,0 +1,8 @@
+[project]
+name = "eventedge-api"
+version = "0.1.0"
+requires-python = ">=3.10"
+dependencies = [
+  "fastapi==0.115.6",
+  "uvicorn[standard]==0.32.1",
+]
