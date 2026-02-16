@@ -5,7 +5,7 @@ import json
 from datetime import datetime, timezone
 from typing import Any, Dict
 
-from fastapi import FastAPI
+from fastapi import FastAPI, Query
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 
@@ -203,3 +203,77 @@ def fear_greed():
         ],
     }
     return json_with_cache(payload, "public, s-maxage=60, stale-while-revalidate=600")
+
+
+@app.get("/api/v1/edge/supercard")
+def edge_supercard(symbol: str = Query("BTC")):
+    sym = (symbol or "BTC").upper()
+    if sym not in ("BTC", "ETH"):
+        sym = "BTC"
+    payload = {
+        "ts": now_iso(),
+        "symbol": sym,
+        "version": "v0.1-placeholder",
+        "summary": {
+            "headline": "—",
+            "stance": "—",
+            "confidence": "—",
+            "notes": ["—", "—", "—"],
+        },
+        "pillars": [
+            {"key": "flow", "label": "Flow", "value": "—", "status": "neutral", "hint": "net flow / pressure"},
+            {"key": "leverage", "label": "Leverage", "value": "—", "status": "neutral", "hint": "OI + funding stress"},
+            {"key": "fragility", "label": "Fragility", "value": "—", "status": "neutral", "hint": "liq imbalance + spikes"},
+            {"key": "momentum", "label": "Momentum", "value": "—", "status": "neutral", "hint": "trend + volatility"},
+            {"key": "sentiment", "label": "Sentiment", "value": "—", "status": "neutral", "hint": "positioning / chatter"},
+            {"key": "risk", "label": "Risk", "value": "—", "status": "neutral", "hint": "regime + confidence"},
+        ],
+        "disclaimer": "Placeholder response. Values will be wired to EventEdge bot outputs and HiveMind rollups.",
+    }
+    return json_with_cache(payload, "public, s-maxage=20, stale-while-revalidate=300")
+
+
+@app.get("/api/v1/edge/regime")
+def edge_regime():
+    payload = {
+        "ts": now_iso(),
+        "version": "v0.1-placeholder",
+        "regime": {
+            "label": "—",
+            "confidence": "—",
+            "since": None,
+        },
+        "axes": [
+            {"key": "trend", "label": "Trend", "value": "—"},
+            {"key": "volatility", "label": "Volatility", "value": "—"},
+            {"key": "leverage", "label": "Leverage", "value": "—"},
+            {"key": "liquidity", "label": "Liquidity", "value": "—"},
+        ],
+        "drivers": ["—", "—", "—"],
+        "disclaimer": "Placeholder response. This will be computed from HiveMind rollups + HiveBank features.",
+    }
+    return json_with_cache(payload, "public, s-maxage=20, stale-while-revalidate=300")
+
+
+@app.get("/api/v1/paper/summary")
+def paper_summary():
+    payload = {
+        "ts": now_iso(),
+        "version": "v0.1-placeholder",
+        "accounts": {
+            "active": 0,
+            "tracked": 0,
+        },
+        "kpis": {
+            "equity_30d": "—",
+            "win_rate": "—",
+            "max_drawdown": "—",
+            "active_positions": "—",
+        },
+        "sample": {
+            "name": "—",
+            "equity_curve": [],
+        },
+        "disclaimer": "Placeholder response. Will be wired to the bot paper trader outcome rollups.",
+    }
+    return json_with_cache(payload, "public, s-maxage=15, stale-while-revalidate=120")
