@@ -61,10 +61,10 @@ def fmt_usd(n: Optional[float]) -> str:
     return f"${n:,.2f}"
 
 
-def fmt_pct(p: Optional[float], digits: int = 2) -> str:
+def fmt_pct(p: Optional[float], digits: int = 2, signed: bool = True) -> str:
     if p is None:
         return "—"
-    sign = "+" if p > 0 else ""
+    sign = "+" if signed and p > 0 else ""
     return f"{sign}{p:.{digits}f}%"
 
 

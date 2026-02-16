@@ -122,7 +122,7 @@ def market_overview():
             },
         ],
         "global": {
-            "btc_dominance": fmt_pct(glob.get("btc_dominance"), 1),
+            "btc_dominance": fmt_pct(glob.get("btc_dominance"), 1, signed=False),
             "total_mcap": fmt_usd(glob.get("total_mcap_usd")),
             "total_vol_24h": fmt_usd(glob.get("total_vol_usd")),
         },
@@ -169,7 +169,7 @@ def asset_card(symbol: str):
         "card": {
             "price": fmt_usd(price),
             "change_24h": fmt_pct(chg24),
-            "dominance": fmt_pct(glob.get(dom_key), 1),
+            "dominance": fmt_pct(glob.get(dom_key), 1, signed=False),
             "vol_24h": fmt_usd(glob.get("total_vol_usd")),
             "funding": fmt_pct(funding_pct, 4) if funding_pct is not None else "—",
             "open_interest": fmt_usd(oi.get("oi_usd")),
