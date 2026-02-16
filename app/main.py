@@ -12,6 +12,7 @@ from fastapi.responses import JSONResponse
 from .fear_greed import get_fear_greed
 from .paper import build_paper_summary
 from .regime import build_regime
+from .simlab import build_simlab_overview, build_simlab_trades_live
 from .supercard import build_supercard
 from .snapshots import (
     extract_funding,
@@ -281,3 +282,35 @@ def paper_summary():
             "disclaimer": "Fallback placeholder. Paper tables unavailable.",
         }
         return json_with_cache(payload, "public, s-maxage=15, stale-while-revalidate=120")
+
+
+@app.get("/api/v1/simlab/overview")
+def simlab_overview(days: int = 30):
+    try:
+        import os
+        tg_id = int(os.environ.get("SIMLAB_ADMIN_TG_ID", "0") or "0")
+        payload = build_simlab_overview(tg_id, days=days)
+        return json_with_cache(payload, "public, s-maxage=10, stale-while-revalidate=60")
+    except Exception:
+        payload = {
+            "ts": now_iso(),
+            "version": "v0.1",
+            "admin": {"tg_id": 0, "accounts": {"total": 0, "active": 0}},
+            "kpis": {"pnl_30d_usdt": "\u2014", "win_rate": "\u2014", "trades_30d": 0, "open_positions": 0, "max_drawdown": "\u2014"},
+            "curve": [],
+            "per_account": [],
+            "disclaimer": "Fallback: simlab overview unavailable.",
+        }
+        return json_with_cache(payload, "public, s-maxage=10, stale-while-revalidate=60")
+
+
+@app.get("/api/v1/simlab/trades/live")
+def simlab_trades_live(limit: int = 50):
+    try:
+        import os
+        tg_id = int(os.environ.get("SIMLAB_ADMIN_TG_ID", "0") or "0")
+        payload = build_simlab_trades_live(tg_id, limit=limit)
+        return json_with_cache(payload, "public, s-maxage=5, stale-while-revalidate=30")
+    except Exception:
+        payload = {"ts": now_iso(), "version": "v0.1", "admin": {"tg_id": 0}, "items": [], "disclaimer": "Fallback: trades feed unavailable."}
+        return json_with_cache(payload, "public, s-maxage=5, stale-while-revalidate=30")
