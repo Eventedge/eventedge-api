@@ -108,7 +108,7 @@ def build_simlab_overview(tg_id: int, days: int = 30) -> Dict[str, Any]:
             active_accounts = set()
             if _table_exists(cur, "paper_positions"):
                 cur.execute(
-                    "select account_id, count(*)::int from paper_positions where status='open' and account_id = any(%s) group by 1",
+                    "select account_id, count(*)::int from paper_positions where status='open' and account_id = any(%s::uuid[]) group by 1",
                     (acct_ids,),
                 )
                 for aid, c in cur.fetchall():
@@ -131,7 +131,7 @@ def build_simlab_overview(tg_id: int, days: int = 30) -> Dict[str, Any]:
                     """
                     select account_id, created_at, net_pnl_usdt
                     from paper_trades
-                    where created_at >= %s and account_id = any(%s)
+                    where created_at >= %s and account_id = any(%s::uuid[])
                     order by created_at asc
                     """,
                     (since, acct_ids),
@@ -157,7 +157,7 @@ def build_simlab_overview(tg_id: int, days: int = 30) -> Dict[str, Any]:
                     """
                     select created_at::date as d, sum(net_pnl_usdt)::float as pnl
                     from paper_trades
-                    where created_at >= %s and account_id = any(%s)
+                    where created_at >= %s and account_id = any(%s::uuid[])
                     group by 1
                     order by 1 asc
                     """,
@@ -196,7 +196,7 @@ def build_simlab_overview(tg_id: int, days: int = 30) -> Dict[str, Any]:
                            sum(case when net_pnl_usdt > 0 then 1 else 0 end)::int as wins,
                            sum(case when net_pnl_usdt < 0 then 1 else 0 end)::int as losses
                     from paper_trades
-                    where created_at >= %s and account_id = any(%s)
+                    where created_at >= %s and account_id = any(%s::uuid[])
                     group by 1
                     """,
                     (since, acct_ids),
@@ -212,7 +212,7 @@ def build_simlab_overview(tg_id: int, days: int = 30) -> Dict[str, Any]:
 
             if _table_exists(cur, "paper_positions"):
                 cur.execute(
-                    "select account_id, count(*)::int from paper_positions where status='open' and account_id = any(%s) group by 1",
+                    "select account_id, count(*)::int from paper_positions where status='open' and account_id = any(%s::uuid[]) group by 1",
                     (acct_ids,),
                 )
                 pos = {r[0]: int(r[1] or 0) for r in cur.fetchall()}
@@ -252,7 +252,7 @@ def build_simlab_trades_live(tg_id: int, limit: int = 50) -> Dict[str, Any]:
                        coalesce(entry_price, entry_price_fill, 0)::float as price,
                        coalesce(net_pnl_usdt, 0)::float as pnl
                 from paper_trades
-                where account_id = any(%s)
+                where account_id = any(%s::uuid[])
                 order by created_at desc
                 limit %s
                 """,
