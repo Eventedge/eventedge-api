@@ -179,6 +179,57 @@ def build_alerts_live(limit: int = 50) -> Dict[str, Any]:
         logger.warning("build_alerts_live failed", exc_info=True)
         items = []
 
+    # If no change alerts, build a "state tape" so the website ticker always has content.
+    if not items:
+        try:
+            reg = build_regime() or {}
+            reg_label = (reg.get("regime") or {}).get("label") or "\u2014"
+            reg_conf = (reg.get("regime") or {}).get("confidence") or "medium"
+
+            fg_parsed, _ = get_fear_greed(max_age_seconds=300)
+            fg_val: Optional[int] = None
+            if fg_parsed:
+                raw = fg_parsed.get("current", {}).get("value")
+                fg_val = int(raw) if raw is not None else None
+            fg_bkt = _sentiment_bucket(fg_val)
+
+            # 2 regime items (BTC, ETH) + 3 sentiment items (BTC, ETH, SOL) = 5 tape items
+            for a in ["BTC", "ETH"]:
+                items.append(
+                    _mk_alert(
+                        ts=now,
+                        category="intelhub",
+                        typ="STATE",
+                        asset=a,
+                        frm="\u2014",
+                        to=str(reg_label),
+                        score=None,
+                        confidence=str(reg_conf),
+                        badge="\U0001f4ca",
+                        headline=f"{a} REGIME",
+                        message=f"{reg_label} ({str(reg_conf).upper()})",
+                    )
+                )
+            for a in ["BTC", "ETH", "SOL"]:
+                items.append(
+                    _mk_alert(
+                        ts=now,
+                        category="market",
+                        typ="STATE",
+                        asset=a,
+                        frm="\u2014",
+                        to=str(fg_bkt),
+                        score=fg_val,
+                        confidence="high",
+                        badge="\U0001f9ed",
+                        headline=f"SENTIMENT | {a}",
+                        message=f"{fg_bkt} (Score: {fg_val})" if fg_val is not None else str(fg_bkt),
+                    )
+                )
+        except Exception:
+            logger.warning("state tape generation failed", exc_info=True)
+            items = []
+
     # newest first
     items = list(reversed(items))[:limit]
 
