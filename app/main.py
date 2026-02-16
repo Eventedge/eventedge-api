@@ -10,6 +10,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 
 from .fear_greed import get_fear_greed
+from .paper import build_paper_summary
 from .supercard import build_supercard
 from .snapshots import (
     extract_funding,
@@ -265,23 +266,16 @@ def edge_regime():
 
 @app.get("/api/v1/paper/summary")
 def paper_summary():
-    payload = {
-        "ts": now_iso(),
-        "version": "v0.1-placeholder",
-        "accounts": {
-            "active": 0,
-            "tracked": 0,
-        },
-        "kpis": {
-            "equity_30d": "—",
-            "win_rate": "—",
-            "max_drawdown": "—",
-            "active_positions": "—",
-        },
-        "sample": {
-            "name": "—",
-            "equity_curve": [],
-        },
-        "disclaimer": "Placeholder response. Will be wired to the bot paper trader outcome rollups.",
-    }
-    return json_with_cache(payload, "public, s-maxage=15, stale-while-revalidate=120")
+    try:
+        payload = build_paper_summary()
+        return json_with_cache(payload, "public, s-maxage=15, stale-while-revalidate=120")
+    except Exception:
+        payload = {
+            "ts": now_iso(),
+            "version": "v0.1-placeholder",
+            "accounts": {"active": 0, "tracked": 0},
+            "kpis": {"equity_30d": "—", "win_rate": "—", "max_drawdown": "—", "active_positions": "—"},
+            "sample": {"name": "—", "equity_curve": []},
+            "disclaimer": "Fallback placeholder. Paper tables unavailable.",
+        }
+        return json_with_cache(payload, "public, s-maxage=15, stale-while-revalidate=120")
