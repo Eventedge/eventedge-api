@@ -22,6 +22,7 @@ from .telemetry_alerts import build_telemetry_alerts
 from .telemetry_paper import build_telemetry_paper
 from .telemetry_data import build_telemetry_data
 from .telemetry_scanners import build_telemetry_scanners
+from .ops_backup_status import build_backup_status
 from .simlab import build_simlab_overview, build_simlab_trades_live
 from .supercard import build_supercard
 from .snapshots import (
@@ -197,6 +198,18 @@ def admin_telemetry_scanners():
     except Exception:
         return JSONResponse(
             content={"ok": False, "generated_at": now_iso(), "error": "Failed to build scanners telemetry"},
+            status_code=200, headers={"Cache-Control": "no-store"},
+        )
+
+
+@app.get("/api/v1/admin/ops/backup_status")
+def admin_ops_backup_status():
+    try:
+        payload = build_backup_status()
+        return json_with_cache(payload, "no-store")
+    except Exception:
+        return JSONResponse(
+            content={"ok": False, "generated_at": now_iso(), "error": "Failed to read backup status"},
             status_code=200, headers={"Cache-Control": "no-store"},
         )
 
