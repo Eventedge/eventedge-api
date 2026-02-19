@@ -14,6 +14,7 @@ from .paper import build_paper_summary
 from .regime import build_regime
 from .alerts import build_alerts_live
 from .health_services import build_health_services
+from .telemetry_summary import build_telemetry_summary
 from .simlab import build_simlab_overview, build_simlab_trades_live
 from .supercard import build_supercard
 from .snapshots import (
@@ -92,6 +93,16 @@ def admin_health_services():
             status_code=200,
             headers={"Cache-Control": "no-store"},
         )
+
+
+@app.get("/api/v1/admin/telemetry/summary")
+def admin_telemetry_summary():
+    payload = build_telemetry_summary()
+    return JSONResponse(
+        content=payload,
+        status_code=501,
+        headers={"Cache-Control": "no-store"},
+    )
 
 
 @app.get("/api/v1/market/overview")
