@@ -32,8 +32,70 @@ def _iso(val: Any) -> str | None:
     return str(val)
 
 
+
+# TTL lookup (seconds) — synced with bot.py _ec_ttl() fallback values.
+# key prefix → expected TTL.  Longest prefix match wins.
+_TTL_MAP: dict[str, int] = {
+    # CoinGecko
+    "coingecko:global": 360,
+    "coingecko:price_simple": 360,
+    # CoinGlass
+    "coinglass:liquidations": 300,
+    "coinglass:funding_rate": 300,
+    "coinglass:open_interest": 300,
+    "coinglass:long_short_ratio": 300,
+    "coinglass:top_trader_sentiment": 600,
+    "coinglass:oi_weighted_funding": 1800,
+    "coinglass:coinbase_premium": 300,
+    "coinglass:exchange_rank": 900,
+    "coinglass:bubble_index": 3600,
+    "coinglass:bull_market_peak": 3600,
+    "coinglass:pi_cycle": 3600,
+    # SoSoValue
+    "sosovalue:etf_flow": 3600,
+    # DefiLlama
+    "defillama:chains": 900,
+    "defillama:global_tvl": 300,
+    "defillama:protocol": 900,
+    # Polymarket / Kalshi
+    "polymarket:active_markets": 900,
+    "kalshi:macro_markets": 900,
+    "kalshi:crypto_markets": 900,
+    # Etherscan
+    "etherscan:gas_oracle": 120,
+    "etherscan:balance": 600,
+    # Alternative.me
+    "altme:fear_greed": 1800,
+    # EdgeCore internal (regime/sentiment refresh ~3 min)
+    "edge:regime": 300,
+    "edge:sentiment": 300,
+}
+
+# Sorted by descending prefix length for longest-prefix match
+_TTL_PREFIXES = sorted(_TTL_MAP.keys(), key=len, reverse=True)
+
+
+def _ttl_for_key(key: str) -> int | None:
+    """Return expected TTL in seconds, or None if unknown."""
+    for prefix in _TTL_PREFIXES:
+        if key.startswith(prefix):
+            return _TTL_MAP[prefix]
+    return None
+
+
+def _classify(age_s: float, ttl_s: int | None) -> str:
+    """Classify freshness: fresh / stale / dead / unknown."""
+    if ttl_s is None:
+        return "unknown"
+    if age_s <= ttl_s * 2:
+        return "fresh"
+    if age_s <= ttl_s * 10:
+        return "stale"
+    return "dead"
+
+
 def _edgecore_snapshots(cur: Any) -> dict[str, Any]:
-    """Snapshot freshness from api_snapshots or edge_dataset_registry."""
+    """Snapshot freshness from edge_dataset_registry."""
     # Prefer edge_dataset_registry (EdgeCore SSOT), fall back to api_snapshots
     table = None
     for t in ("edge_dataset_registry", "api_snapshots"):
@@ -56,33 +118,33 @@ def _edgecore_snapshots(cur: Any) -> dict[str, Any]:
         f"FROM {table} ORDER BY {key_col}"
     )
     rows = cur.fetchall()
+
+    # Skip internal cooldown keys
+    rows = [(k, ts, age) for k, ts, age in rows if not k.startswith("_cooldown:")]
+
     total = len(rows)
-    stale = 0
-    dead = 0
+    counts: dict[str, int] = {"fresh": 0, "stale": 0, "dead": 0, "unknown": 0}
     snapshots = []
     for key, updated_at, age_s in rows:
         age = float(age_s or 0)
-        if age > 1200:
-            status = "dead"
-            dead += 1
-        elif age > 600:
-            status = "stale"
-            stale += 1
-        else:
-            status = "fresh"
+        ttl = _ttl_for_key(key)
+        status = _classify(age, ttl)
+        counts[status] += 1
         snapshots.append({
             "key": key,
             "updated_at": _iso(updated_at),
             "age_s": round(age, 1),
+            "ttl_s": ttl,
             "status": status,
         })
 
     return {
         "available": True,
         "total_keys": total,
-        "fresh": total - stale - dead,
-        "stale": stale,
-        "dead": dead,
+        "fresh": counts["fresh"],
+        "stale": counts["stale"],
+        "dead": counts["dead"],
+        "unknown": counts["unknown"],
         "snapshots": snapshots,
     }
 
@@ -144,6 +206,7 @@ def build_telemetry_data() -> dict[str, Any]:
                         "fresh": ec["fresh"],
                         "stale": ec["stale"],
                         "dead": ec["dead"],
+                        "unknown": ec["unknown"],
                         "snapshots": ec["snapshots"],
                     }
                 else:
