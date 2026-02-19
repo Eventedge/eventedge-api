@@ -13,6 +13,7 @@ from .fear_greed import get_fear_greed
 from .paper import build_paper_summary
 from .regime import build_regime
 from .alerts import build_alerts_live
+from .health_services import build_health_services
 from .simlab import build_simlab_overview, build_simlab_trades_live
 from .supercard import build_supercard
 from .snapshots import (
@@ -60,6 +61,7 @@ app.add_middleware(
     allow_origins=[
         "https://edgeblocks.io",
         "https://www.edgeblocks.io",
+        "https://admin.edgeblocks.io",
         "http://localhost:3000",
     ],
     allow_credentials=False,
@@ -72,6 +74,24 @@ app.add_middleware(
 def health():
     payload = {"ok": True, "service": "eventedge-api", "api": "v1", "ts": now_iso()}
     return json_with_cache(payload, "public, max-age=5")
+
+
+@app.get("/api/v1/admin/health/services")
+def admin_health_services():
+    try:
+        payload = build_health_services()
+        return json_with_cache(payload, "no-store")
+    except Exception:
+        return JSONResponse(
+            content={
+                "now_utc": now_iso(),
+                "thresholds": {"stale_s": 300, "down_s": 1800},
+                "services": [],
+                "error": "Failed to query service_heartbeats table",
+            },
+            status_code=200,
+            headers={"Cache-Control": "no-store"},
+        )
 
 
 @app.get("/api/v1/market/overview")
