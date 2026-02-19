@@ -37,19 +37,19 @@ def _scanner_runs(cur: Any) -> dict[str, Any]:
         return _unavailable()
 
     cur.execute(
-        "SELECT DISTINCT ON (scanner_id) "
-        "  scanner_id, run_at, duration_s, result_count, status "
+        "SELECT scanner, timeframe, last_run_at, "
+        "  last_run_duration_ms, signals_found, status "
         "FROM scanner_run_meta "
-        "ORDER BY scanner_id, run_at DESC"
+        "ORDER BY last_run_at DESC NULLS LAST"
     )
     scanners = []
-    for sid, run_at, duration, results, status in cur.fetchall():
+    for scanner, timeframe, run_at, duration_ms, signals, status in cur.fetchall():
         age_s = (datetime.now(timezone.utc) - run_at).total_seconds() if run_at else None
         scanners.append({
-            "scanner_id": sid,
+            "scanner_id": f"{scanner}:{timeframe}",
             "last_run_at": _iso(run_at),
-            "duration_s": round(float(duration or 0), 2),
-            "result_count": int(results or 0),
+            "duration_s": round(float(duration_ms or 0) / 1000.0, 2),
+            "result_count": int(signals or 0),
             "status": status or "unknown",
             "age_s": round(age_s, 1) if age_s is not None else None,
         })
@@ -62,15 +62,20 @@ def _scanner_cache(cur: Any) -> list[dict[str, Any]]:
         return []
 
     cur.execute(
-        "SELECT cache_key, updated_at, "
-        "  EXTRACT(EPOCH FROM NOW() - updated_at) AS age_s "
-        "FROM scanner_cache ORDER BY cache_key"
+        "SELECT scanner || ':' || timeframe AS cache_key, "
+        "  MAX(scanned_at) AS updated_at, "
+        "  EXTRACT(EPOCH FROM NOW() - MAX(scanned_at)) AS age_s, "
+        "  COUNT(*) AS entries "
+        "FROM scanner_cache "
+        "GROUP BY scanner, timeframe "
+        "ORDER BY scanner, timeframe"
     )
     return [
         {
             "cache_key": row[0],
             "updated_at": _iso(row[1]),
             "age_s": round(float(row[2] or 0), 1),
+            "entries": int(row[3]),
         }
         for row in cur.fetchall()
     ]
