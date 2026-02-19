@@ -37,38 +37,46 @@ class OverviewPayload:
 # ---------------------------------------------------------------------------
 
 @dataclass
-class InviteCodeEntry:
-    code: str
-    created_at: str
-    redeemed_count: int
-    max_uses: Optional[int]
+class TierEntry:
     tier: str
+    count: int
 
 
 @dataclass
-class TierChangeEntry:
+class LastSeenBuckets:
+    h24: int = 0
+    d7: int = 0
+    gt7d: int = 0
+    unknown: int = 0
+
+
+@dataclass
+class RecentUserEntry:
     user_id: int
-    old_tier: str
-    new_tier: str
-    changed_at: str
-    reason: str
+    tier: str
+    created_at: Optional[str] = None
+    last_seen_at: Optional[str] = None
+    invite_code: Optional[str] = None
+    invite_source: Optional[int] = None
 
 
 @dataclass
-class InviteSummary:
-    total_generated: int = 0
-    total_redeemed: int = 0
-    codes: list[InviteCodeEntry] = field(default_factory=list)
+class UsersBlock:
+    total_users: Optional[int] = None
+    new_24h: Optional[int] = None
+    new_7d: Optional[int] = None
+    active_24h: Optional[int] = None
+    active_7d: Optional[int] = None
+    tiers: list[TierEntry] = field(default_factory=list)
+    last_seen_buckets: Optional[LastSeenBuckets] = None
+    recent: list[RecentUserEntry] = field(default_factory=list)
 
 
 @dataclass
 class UsersPayload:
     generated_at: str
-    total_users: int = 0
-    tier_distribution: dict[str, int] = field(default_factory=dict)
-    active_sessions_24h: int = 0
-    invite_codes: InviteSummary = field(default_factory=InviteSummary)
-    recent_tier_changes: list[TierChangeEntry] = field(default_factory=list)
+    ok: bool = True
+    users: UsersBlock = field(default_factory=UsersBlock)
 
 
 # ---------------------------------------------------------------------------
