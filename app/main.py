@@ -14,6 +14,7 @@ from .paper import build_paper_summary
 from .regime import build_regime
 from .alerts import build_alerts_live
 from .health_services import build_health_services
+from .telemetry_overview import build_telemetry_overview
 from .telemetry_summary import build_telemetry_summary
 from .simlab import build_simlab_overview, build_simlab_trades_live
 from .supercard import build_supercard
@@ -89,6 +90,23 @@ def admin_health_services():
                 "thresholds": {"stale_s": 300, "down_s": 1800},
                 "services": [],
                 "error": "Failed to query service_heartbeats table",
+            },
+            status_code=200,
+            headers={"Cache-Control": "no-store"},
+        )
+
+
+@app.get("/api/v1/admin/telemetry/overview")
+def admin_telemetry_overview():
+    try:
+        payload = build_telemetry_overview()
+        return json_with_cache(payload, "no-store")
+    except Exception:
+        return JSONResponse(
+            content={
+                "ok": False,
+                "generated_at": now_iso(),
+                "error": "Failed to build telemetry overview",
             },
             status_code=200,
             headers={"Cache-Control": "no-store"},
