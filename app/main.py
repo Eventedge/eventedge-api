@@ -17,6 +17,7 @@ from .health_services import build_health_services
 from .telemetry_overview import build_telemetry_overview
 from .telemetry_summary import build_telemetry_summary
 from .telemetry_users import build_telemetry_users
+from .telemetry_invites import build_telemetry_invites
 from .simlab import build_simlab_overview, build_simlab_trades_live
 from .supercard import build_supercard
 from .snapshots import (
@@ -125,6 +126,23 @@ def admin_telemetry_users():
                 "ok": False,
                 "generated_at": now_iso(),
                 "error": "Failed to build users telemetry",
+            },
+            status_code=200,
+            headers={"Cache-Control": "no-store"},
+        )
+
+
+@app.get("/api/v1/admin/telemetry/invites")
+def admin_telemetry_invites():
+    try:
+        payload = build_telemetry_invites()
+        return json_with_cache(payload, "no-store")
+    except Exception:
+        return JSONResponse(
+            content={
+                "ok": False,
+                "generated_at": now_iso(),
+                "error": "Failed to build invites telemetry",
             },
             status_code=200,
             headers={"Cache-Control": "no-store"},

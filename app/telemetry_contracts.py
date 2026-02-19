@@ -80,6 +80,61 @@ class UsersPayload:
 
 
 # ---------------------------------------------------------------------------
+# 2b. Invites
+# ---------------------------------------------------------------------------
+
+@dataclass
+class InviteByTierEntry:
+    tier: str
+    codes: int
+    total_uses: int
+
+
+@dataclass
+class InviteCodeDetail:
+    code: str
+    tier: str
+    uses: int
+    max_uses: Optional[int]
+    is_enabled: bool
+    created_at: Optional[str] = None
+    created_by: Optional[int] = None
+    expires_at: Optional[str] = None
+    note: Optional[str] = None
+
+
+@dataclass
+class RecentRedemptionEntry:
+    user_id: int
+    code: str
+    redeemed_at: Optional[str] = None
+    tier: Optional[str] = None
+
+
+@dataclass
+class InvitesBlock:
+    total_codes: Optional[int] = None
+    created_24h: Optional[int] = None
+    created_7d: Optional[int] = None
+    active: Optional[int] = None
+    disabled: Optional[int] = None
+    expired: Optional[int] = None
+    total_redeemed: Optional[int] = None
+    redeemed_24h: Optional[int] = None
+    redeemed_7d: Optional[int] = None
+    by_tier: list[InviteByTierEntry] = field(default_factory=list)
+    top_codes: list[InviteCodeDetail] = field(default_factory=list)
+    recent_redemptions: list[RecentRedemptionEntry] = field(default_factory=list)
+
+
+@dataclass
+class InvitesPayload:
+    generated_at: str
+    ok: bool = True
+    invites: InvitesBlock = field(default_factory=InvitesBlock)
+
+
+# ---------------------------------------------------------------------------
 # 3. Menu Toggles
 # ---------------------------------------------------------------------------
 
