@@ -81,7 +81,7 @@ def _recent_alerts(cur: Any) -> list[dict[str, Any]]:
 
     cur.execute(
         "SELECT event_type, created_at, "
-        "  COALESCE(payload::text, '') "
+        "  COALESCE(metadata::text, '') "
         "FROM alert_lifecycle "
         "ORDER BY created_at DESC LIMIT 20"
     )
@@ -148,6 +148,7 @@ def build_telemetry_alerts() -> dict[str, Any]:
                     alerts["breakdown_7d"] = {}
                     errors.append(f"lifecycle: {lc.get('reason')}")
             except Exception as exc:
+                conn.rollback()
                 alerts["total_24h"] = None
                 alerts["total_7d"] = None
                 alerts["fired_24h"] = None
@@ -159,6 +160,7 @@ def build_telemetry_alerts() -> dict[str, Any]:
             try:
                 alerts["recent"] = _recent_alerts(cur)
             except Exception as exc:
+                conn.rollback()
                 alerts["recent"] = []
                 errors.append(f"recent: {type(exc).__name__}")
 
@@ -168,6 +170,7 @@ def build_telemetry_alerts() -> dict[str, Any]:
                 if not ad.get("available"):
                     errors.append(f"alertd: {ad.get('reason')}")
             except Exception as exc:
+                conn.rollback()
                 alerts["alertd"] = {"daemons": []}
                 errors.append(f"alertd: {type(exc).__name__}")
 

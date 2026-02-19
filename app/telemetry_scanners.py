@@ -96,12 +96,14 @@ def build_telemetry_scanners() -> dict[str, Any]:
                     result_scanners["scanners"] = []
                     errors.append(f"scanners: {runs.get('reason')}")
             except Exception as exc:
+                conn.rollback()
                 result_scanners["scanners"] = []
                 errors.append(f"scanners: {type(exc).__name__}")
 
             try:
                 result_scanners["cache"] = _scanner_cache(cur)
             except Exception as exc:
+                conn.rollback()
                 result_scanners["cache"] = []
                 errors.append(f"cache: {type(exc).__name__}")
 

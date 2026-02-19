@@ -34,20 +34,25 @@ def _iso(val: Any) -> str | None:
 
 def _edgecore_snapshots(cur: Any) -> dict[str, Any]:
     """Snapshot freshness from api_snapshots or edge_dataset_registry."""
-    # Try api_snapshots first, fall back to edge_dataset_registry
+    # Prefer edge_dataset_registry (EdgeCore SSOT), fall back to api_snapshots
     table = None
-    for t in ("api_snapshots", "edge_dataset_registry"):
+    for t in ("edge_dataset_registry", "api_snapshots"):
         if _table_exists(cur, t):
             table = t
             break
     if table is None:
         return _unavailable()
 
-    key_col = "snapshot_key" if table == "api_snapshots" else "dataset_key"
+    if table == "edge_dataset_registry":
+        key_col = "dataset_key"
+        ts_col = "updated_at"
+    else:
+        key_col = "data_type"
+        ts_col = "created_at"
 
     cur.execute(
-        f"SELECT {key_col}, updated_at, "
-        f"  EXTRACT(EPOCH FROM NOW() - updated_at) AS age_s "
+        f"SELECT {key_col}, {ts_col}, "
+        f"  EXTRACT(EPOCH FROM NOW() - {ts_col}) AS age_s "
         f"FROM {table} ORDER BY {key_col}"
     )
     rows = cur.fetchall()
@@ -145,6 +150,7 @@ def build_telemetry_data() -> dict[str, Any]:
                     data["edgecore"] = None
                     errors.append(f"edgecore: {ec.get('reason')}")
             except Exception as exc:
+                conn.rollback()
                 data["edgecore"] = None
                 errors.append(f"edgecore: {type(exc).__name__}")
 
@@ -160,6 +166,7 @@ def build_telemetry_data() -> dict[str, Any]:
                     data["database"] = None
                     errors.append(f"database: {db.get('reason')}")
             except Exception as exc:
+                conn.rollback()
                 data["database"] = None
                 errors.append(f"database: {type(exc).__name__}")
 
