@@ -18,6 +18,10 @@ from .telemetry_overview import build_telemetry_overview
 from .telemetry_summary import build_telemetry_summary
 from .telemetry_users import build_telemetry_users
 from .telemetry_invites import build_telemetry_invites
+from .telemetry_alerts import build_telemetry_alerts
+from .telemetry_paper import build_telemetry_paper
+from .telemetry_data import build_telemetry_data
+from .telemetry_scanners import build_telemetry_scanners
 from .simlab import build_simlab_overview, build_simlab_trades_live
 from .supercard import build_supercard
 from .snapshots import (
@@ -146,6 +150,54 @@ def admin_telemetry_invites():
             },
             status_code=200,
             headers={"Cache-Control": "no-store"},
+        )
+
+
+@app.get("/api/v1/admin/telemetry/alerts")
+def admin_telemetry_alerts():
+    try:
+        payload = build_telemetry_alerts()
+        return json_with_cache(payload, "no-store")
+    except Exception:
+        return JSONResponse(
+            content={"ok": False, "generated_at": now_iso(), "error": "Failed to build alerts telemetry"},
+            status_code=200, headers={"Cache-Control": "no-store"},
+        )
+
+
+@app.get("/api/v1/admin/telemetry/paper")
+def admin_telemetry_paper():
+    try:
+        payload = build_telemetry_paper()
+        return json_with_cache(payload, "no-store")
+    except Exception:
+        return JSONResponse(
+            content={"ok": False, "generated_at": now_iso(), "error": "Failed to build paper telemetry"},
+            status_code=200, headers={"Cache-Control": "no-store"},
+        )
+
+
+@app.get("/api/v1/admin/telemetry/data")
+def admin_telemetry_data():
+    try:
+        payload = build_telemetry_data()
+        return json_with_cache(payload, "no-store")
+    except Exception:
+        return JSONResponse(
+            content={"ok": False, "generated_at": now_iso(), "error": "Failed to build data telemetry"},
+            status_code=200, headers={"Cache-Control": "no-store"},
+        )
+
+
+@app.get("/api/v1/admin/telemetry/scanners")
+def admin_telemetry_scanners():
+    try:
+        payload = build_telemetry_scanners()
+        return json_with_cache(payload, "no-store")
+    except Exception:
+        return JSONResponse(
+            content={"ok": False, "generated_at": now_iso(), "error": "Failed to build scanners telemetry"},
+            status_code=200, headers={"Cache-Control": "no-store"},
         )
 
 
