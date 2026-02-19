@@ -26,10 +26,16 @@ def _status(age_seconds: float) -> str:
     return "down"
 
 
+REQUIRED_SERVICES = ("eventedge-bot", "eventedge-alertd")
+
+
 def build_health_services() -> dict[str, Any]:
-    """Query service_heartbeats and return status for all known services."""
+    """Query service_heartbeats and return status for all known services.
+
+    Always includes REQUIRED_SERVICES even when no DB row exists (shown as
+    ``down`` with ``last_seen: null``).
+    """
     now = datetime.now(timezone.utc)
-    services: list[dict[str, Any]] = []
 
     with get_conn() as conn:
         with conn.cursor() as cur:
@@ -40,15 +46,29 @@ def build_health_services() -> dict[str, Any]:
             )
             rows = cur.fetchall()
 
+    seen: dict[str, dict[str, Any]] = {}
     for service_name, last_seen_at, meta in rows:
         age_s = (now - last_seen_at).total_seconds()
-        services.append({
+        seen[service_name] = {
             "service_key": service_name,
             "status": _status(age_s),
             "age_s": round(age_s, 1),
             "last_seen": last_seen_at.isoformat(),
             "detail": meta if isinstance(meta, dict) else {},
-        })
+        }
+
+    # Ensure required services are always present
+    for svc in REQUIRED_SERVICES:
+        if svc not in seen:
+            seen[svc] = {
+                "service_key": svc,
+                "status": "down",
+                "age_s": 999999,
+                "last_seen": None,
+                "detail": {},
+            }
+
+    services = sorted(seen.values(), key=lambda s: s["service_key"])
 
     return {
         "now_utc": now.isoformat(),
