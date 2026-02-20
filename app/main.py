@@ -35,6 +35,7 @@ from .snapshots import (
     fmt_usd,
     get_snapshot,
 )
+from .hypepipe import router as hypepipe_router
 
 
 def now_iso() -> str:
@@ -74,9 +75,11 @@ app.add_middleware(
         "http://localhost:3000",
     ],
     allow_credentials=False,
-    allow_methods=["GET", "OPTIONS"],
+    allow_methods=["GET", "POST", "OPTIONS"],
     allow_headers=["*"],
 )
+
+app.include_router(hypepipe_router)
 
 
 @app.get("/api/v1/health")
