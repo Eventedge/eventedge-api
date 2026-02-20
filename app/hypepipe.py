@@ -58,6 +58,7 @@ from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field
 
 from .db import get_conn
+from .regime import build_regime
 from .snapshots import get_snapshot
 
 logger = logging.getLogger(__name__)
@@ -107,6 +108,7 @@ class CapResponse(BaseModel):
 
 CAP_REQUIRED_SCOPE: Dict[str, str] = {
     "core.asset.snapshot": "read:core.asset.snapshot",
+    "macro.regime.snapshot": "read:macro.regime.snapshot",
 }
 
 
@@ -304,13 +306,58 @@ def _dispatch_core_asset_snapshot(input_data: Dict[str, Any]) -> Dict[str, Any]:
     return {"asset": asset, "note": "stub", "asof": _now_iso()}
 
 
+def _dispatch_macro_regime_snapshot(input_data: Dict[str, Any]) -> Dict[str, Any]:
+    """Derive macro regime from live EdgeCore snapshots via build_regime().
+
+    Heuristic (v1, deterministic):
+      - build_regime() reads BTC price, funding, OI, liquidations, Fear & Greed
+        from edge_dataset_registry and classifies into buckets.
+      - We map its axes/regime label into the HypePipe response shape.
+
+    Regime mapping (build_regime label -> HypePipe regime):
+      Risk-On  -> risk_on
+      Risk-Off -> risk_off
+      Trend    -> neutral   (directional but not risk-classified)
+      Chop     -> neutral
+    """
+    regime_data = build_regime()
+    regime_raw = regime_data.get("regime", {})
+    label = regime_raw.get("label", "Chop")
+    axes = {a["key"]: a["value"] for a in regime_data.get("axes", [])}
+
+    # Map composite regime label
+    regime_map = {"Risk-On": "risk_on", "Risk-Off": "risk_off"}
+    regime = regime_map.get(label, "neutral")
+
+    # Vol regime from volatility axis
+    vol_map = {"Calm": "low", "Chop": "mid", "Shock": "high"}
+    vol_regime = vol_map.get(axes.get("volatility", ""), "mid")
+
+    # Liquidity regime from liquidity axis
+    liq_map = {"Loose": "loose", "Normal": "neutral", "Tight": "tight"}
+    liquidity_regime = liq_map.get(axes.get("liquidity", ""), "neutral")
+
+    notes = regime_data.get("drivers", [])
+    asof = _now_iso()
+
+    return {
+        "regime": regime,
+        "vol_regime": vol_regime,
+        "liquidity_regime": liquidity_regime,
+        "notes": notes,
+        "asof": asof,
+    }
+
+
 CAPABILITY_HANDLERS = {
     "core.asset.snapshot": _dispatch_core_asset_snapshot,
+    "macro.regime.snapshot": _dispatch_macro_regime_snapshot,
 }
 
 # Default TTL per cap (seconds).  Caps not listed here are not cached.
 CAP_DEFAULT_TTL: Dict[str, int] = {
     "core.asset.snapshot": 30,
+    "macro.regime.snapshot": 120,
 }
 
 
