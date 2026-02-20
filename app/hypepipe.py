@@ -1,4 +1,4 @@
-"""HypePipe endpoints (HP-001 + HP-002).
+"""HypePipe endpoints (HP-001 / HP-002 / HP-003).
 
 Provides:
   GET  /api/v1/hypepipe/health  — liveness probe (no auth)
@@ -12,8 +12,18 @@ Auth (HP-002 — JWT HS256):
   - X-Agent-Id header must match JWT agent_id claim
   - Scopes enforced per capability (e.g. read:core.asset.snapshot)
 
+Cache (HP-003 — in-memory TTL):
+  - Read caps are cached by (cap, normalized_input).
+  - Default TTL 30s.  Override via opts.freshness_s (clamped to TTL).
+  - Disable entirely: HYPEPIPE_CACHE_DISABLE=1
+
 Audit:
   - Every /cap call logs to hypepipe_audit_events table.
+  - Columns: policy_version, deny_reason, asof, cache_hit.
+
+Deny reason codes:
+  missing_header | missing_token | invalid_token | expired
+  agent_mismatch | scope_denied  | unknown_cap
 
 Dev token helper (ops-only, NOT an endpoint):
   python3 -c "
@@ -32,12 +42,15 @@ Dev token helper (ops-only, NOT an endpoint):
 
 from __future__ import annotations
 
+import hashlib
+import json
 import logging
 import os
+import threading
 import time
 import uuid
 from datetime import datetime, timezone
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 import jwt
 from fastapi import APIRouter, Header, HTTPException, Request
@@ -57,7 +70,7 @@ router = APIRouter(prefix="/api/v1/hypepipe", tags=["hypepipe"])
 # ---------------------------------------------------------------------------
 
 class CapContext(BaseModel):
-    agent_id: str
+    agent_id: Optional[str] = None
     user_id: Optional[int] = None
     tier: Optional[str] = None
 
@@ -70,9 +83,9 @@ class CapOpts(BaseModel):
 class CapRequest(BaseModel):
     cap: str
     input: Dict[str, Any] = Field(default_factory=dict)
-    ctx: CapContext
+    ctx: CapContext = Field(default_factory=CapContext)
     opts: CapOpts = Field(default_factory=CapOpts)
-    request_id: str = Field(default_factory=lambda: uuid.uuid4().hex)
+    request_id: str
 
 
 class CapMeta(BaseModel):
@@ -138,37 +151,34 @@ def _check_auth(
 ) -> AuthResult:
     """Verify JWT and match X-Agent-Id. Returns AuthResult on success."""
     if not x_agent_id:
-        raise HTTPException(status_code=401, detail="Missing X-Agent-Id header")
+        raise HTTPException(status_code=401, detail="missing_header")
     if not authorization or not authorization.startswith("Bearer "):
-        raise HTTPException(status_code=401, detail="Missing or invalid Authorization Bearer token")
+        raise HTTPException(status_code=401, detail="missing_token")
 
     token = authorization[len("Bearer "):]
     if not token.strip():
-        raise HTTPException(status_code=401, detail="Empty bearer token")
+        raise HTTPException(status_code=401, detail="missing_token")
 
     secret = _get_jwt_secret()
 
     try:
         claims = jwt.decode(token, secret, algorithms=["HS256"], options={"require": ["exp", "agent_id", "scopes", "tier"]})
     except jwt.ExpiredSignatureError:
-        raise HTTPException(status_code=401, detail="Token expired")
-    except jwt.InvalidTokenError as exc:
-        raise HTTPException(status_code=401, detail=f"Invalid token: {exc}")
+        raise HTTPException(status_code=401, detail="expired")
+    except jwt.InvalidTokenError:
+        raise HTTPException(status_code=401, detail="invalid_token")
 
     jwt_agent_id = claims.get("agent_id", "")
     if jwt_agent_id != x_agent_id:
-        raise HTTPException(
-            status_code=401,
-            detail="X-Agent-Id header does not match token agent_id claim",
-        )
+        raise HTTPException(status_code=401, detail="agent_mismatch")
 
     scopes = claims.get("scopes", [])
     if not isinstance(scopes, list):
-        raise HTTPException(status_code=401, detail="Token scopes claim must be an array")
+        raise HTTPException(status_code=401, detail="invalid_token")
 
     tier = claims.get("tier", "")
     if tier not in ("readonly", "paper", "orchestrator"):
-        raise HTTPException(status_code=401, detail=f"Unknown tier: {tier}")
+        raise HTTPException(status_code=401, detail="invalid_token")
 
     return AuthResult(
         agent_id=jwt_agent_id,
@@ -179,10 +189,10 @@ def _check_auth(
 
 
 def _check_scope(auth: AuthResult, cap: str) -> Optional[str]:
-    """Return deny_reason string if scope check fails, else None."""
+    """Return deny_reason code if scope check fails, else None."""
     required = CAP_REQUIRED_SCOPE.get(cap)
     if required and required not in auth.scopes:
-        return f"Missing required scope '{required}'"
+        return "scope_denied"
     return None
 
 
@@ -204,13 +214,17 @@ CREATE TABLE IF NOT EXISTS hypepipe_audit_events (
     decision        TEXT NOT NULL,
     latency_ms      INTEGER,
     policy_version  TEXT,
-    deny_reason     TEXT
+    deny_reason     TEXT,
+    asof            TEXT,
+    cache_hit       BOOLEAN
 );
 """
 
 _MIGRATE_COLUMNS_SQL = [
     "ALTER TABLE hypepipe_audit_events ADD COLUMN IF NOT EXISTS policy_version TEXT",
     "ALTER TABLE hypepipe_audit_events ADD COLUMN IF NOT EXISTS deny_reason TEXT",
+    "ALTER TABLE hypepipe_audit_events ADD COLUMN IF NOT EXISTS asof TEXT",
+    "ALTER TABLE hypepipe_audit_events ADD COLUMN IF NOT EXISTS cache_hit BOOLEAN",
 ]
 
 
@@ -240,6 +254,8 @@ def _log_audit(
     latency_ms: Optional[int] = None,
     policy_version: Optional[str] = None,
     deny_reason: Optional[str] = None,
+    asof: Optional[str] = None,
+    cache_hit: Optional[bool] = None,
 ) -> None:
     try:
         _ensure_audit_table()
@@ -248,10 +264,10 @@ def _log_audit(
                 cur.execute(
                     """INSERT INTO hypepipe_audit_events
                        (agent_id, user_id, cap, request_id, trace_id, decision,
-                        latency_ms, policy_version, deny_reason)
-                       VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)""",
+                        latency_ms, policy_version, deny_reason, asof, cache_hit)
+                       VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)""",
                     (agent_id, user_id, cap, request_id, trace_id, decision,
-                     latency_ms, policy_version, deny_reason),
+                     latency_ms, policy_version, deny_reason, asof, cache_hit),
                 )
             conn.commit()
     except Exception:
@@ -292,6 +308,45 @@ CAPABILITY_HANDLERS = {
     "core.asset.snapshot": _dispatch_core_asset_snapshot,
 }
 
+# Default TTL per cap (seconds).  Caps not listed here are not cached.
+CAP_DEFAULT_TTL: Dict[str, int] = {
+    "core.asset.snapshot": 30,
+}
+
+
+# ---------------------------------------------------------------------------
+# In-memory TTL cache (HP-003)
+# ---------------------------------------------------------------------------
+
+_CACHE_DISABLED = os.environ.get("HYPEPIPE_CACHE_DISABLE", "") == "1"
+
+# {cache_key: (data_dict, asof_str, cached_at_monotonic)}
+_cap_cache: Dict[str, Tuple[Dict[str, Any], str, float]] = {}
+_cache_lock = threading.Lock()
+
+
+def _cache_key(cap: str, input_data: Dict[str, Any]) -> str:
+    """Deterministic key from cap + sorted input."""
+    raw = json.dumps({"cap": cap, "input": input_data}, sort_keys=True, separators=(",", ":"))
+    return hashlib.sha256(raw.encode()).hexdigest()
+
+
+def _cache_get(key: str, max_age: float) -> Optional[Tuple[Dict[str, Any], str]]:
+    """Return (data, asof) if cached and fresh enough, else None."""
+    with _cache_lock:
+        entry = _cap_cache.get(key)
+        if entry is None:
+            return None
+        data, asof, cached_at = entry
+        if (time.monotonic() - cached_at) > max_age:
+            return None
+        return data, asof
+
+
+def _cache_put(key: str, data: Dict[str, Any], asof: str) -> None:
+    with _cache_lock:
+        _cap_cache[key] = (data, asof, time.monotonic())
+
 
 # ---------------------------------------------------------------------------
 # Routes
@@ -316,7 +371,18 @@ def hypepipe_cap(
     t0 = time.monotonic()
     policy_version: Optional[str] = None
 
-    # Auth check (JWT)
+    # --- request_id validation ---
+    if not body.request_id or not body.request_id.strip():
+        return JSONResponse(
+            status_code=400,
+            content={
+                "ok": False,
+                "error": "request_id is required and must be non-empty",
+                "meta": {"cap": body.cap, "trace_id": trace_id, "asof": None, "cache_hit": None},
+            },
+        )
+
+    # --- Auth check (JWT) ---
     try:
         auth = _check_auth(x_agent_id, authorization)
         policy_version = auth.policy_version
@@ -334,7 +400,7 @@ def hypepipe_cap(
         )
         raise exc
 
-    # Scope enforcement
+    # --- Scope enforcement ---
     deny_reason = _check_scope(auth, body.cap)
     if deny_reason:
         latency_ms = int((time.monotonic() - t0) * 1000)
@@ -344,7 +410,7 @@ def hypepipe_cap(
             cap=body.cap,
             request_id=body.request_id,
             trace_id=trace_id,
-            decision="scope_denied",
+            decision="deny",
             latency_ms=latency_ms,
             policy_version=policy_version,
             deny_reason=deny_reason,
@@ -358,7 +424,7 @@ def hypepipe_cap(
             },
         )
 
-    # Capability dispatch
+    # --- Unknown cap ---
     handler = CAPABILITY_HANDLERS.get(body.cap)
     if handler is None:
         latency_ms = int((time.monotonic() - t0) * 1000)
@@ -368,9 +434,10 @@ def hypepipe_cap(
             cap=body.cap,
             request_id=body.request_id,
             trace_id=trace_id,
-            decision="unknown_cap",
+            decision="deny",
             latency_ms=latency_ms,
             policy_version=policy_version,
+            deny_reason="unknown_cap",
         )
         return JSONResponse(
             status_code=400,
@@ -382,30 +449,61 @@ def hypepipe_cap(
             },
         )
 
-    try:
-        result = handler(body.input)
-    except Exception:
-        logger.exception("Capability handler failed: cap=%s", body.cap)
-        latency_ms = int((time.monotonic() - t0) * 1000)
-        _log_audit(
-            agent_id=auth.agent_id,
-            user_id=body.ctx.user_id,
-            cap=body.cap,
-            request_id=body.request_id,
-            trace_id=trace_id,
-            decision="error",
-            latency_ms=latency_ms,
-            policy_version=policy_version,
-        )
-        return JSONResponse(
-            status_code=500,
-            content={
-                "ok": False,
-                "error": "Internal capability error",
-                "meta": {"cap": body.cap, "trace_id": trace_id, "asof": None, "cache_hit": None},
-            },
-        )
+    # --- Cache lookup ---
+    default_ttl = CAP_DEFAULT_TTL.get(body.cap, 0)
+    cache_hit: Optional[bool] = None
+    result: Optional[Dict[str, Any]] = None
+    asof: Optional[str] = None
 
+    if default_ttl > 0 and not _CACHE_DISABLED:
+        freshness = body.opts.freshness_s
+        if freshness is not None:
+            max_age = min(max(freshness, 0), default_ttl)
+        else:
+            max_age = default_ttl
+
+        ck = _cache_key(body.cap, body.input)
+
+        if max_age > 0:
+            cached = _cache_get(ck, float(max_age))
+            if cached is not None:
+                result, asof = cached
+                cache_hit = True
+
+    # --- Dispatch (on miss) ---
+    if result is None:
+        cache_hit = False
+        try:
+            result = handler(body.input)
+        except Exception:
+            logger.exception("Capability handler failed: cap=%s", body.cap)
+            latency_ms = int((time.monotonic() - t0) * 1000)
+            _log_audit(
+                agent_id=auth.agent_id,
+                user_id=body.ctx.user_id,
+                cap=body.cap,
+                request_id=body.request_id,
+                trace_id=trace_id,
+                decision="error",
+                latency_ms=latency_ms,
+                policy_version=policy_version,
+            )
+            return JSONResponse(
+                status_code=500,
+                content={
+                    "ok": False,
+                    "error": "Internal capability error",
+                    "meta": {"cap": body.cap, "trace_id": trace_id, "asof": None, "cache_hit": False},
+                },
+            )
+
+        asof = result.get("asof") if isinstance(result, dict) else None
+
+        # Store in cache
+        if default_ttl > 0 and not _CACHE_DISABLED and asof:
+            _cache_put(_cache_key(body.cap, body.input), result, asof)
+
+    # --- Success audit + response ---
     latency_ms = int((time.monotonic() - t0) * 1000)
     _log_audit(
         agent_id=auth.agent_id,
@@ -416,15 +514,15 @@ def hypepipe_cap(
         decision="allow",
         latency_ms=latency_ms,
         policy_version=policy_version,
+        asof=asof,
+        cache_hit=cache_hit,
     )
-
-    asof = result.get("asof") if isinstance(result, dict) else None
 
     return JSONResponse(
         content={
             "ok": True,
             "data": result,
-            "meta": {"cap": body.cap, "trace_id": trace_id, "asof": asof, "cache_hit": None},
+            "meta": {"cap": body.cap, "trace_id": trace_id, "asof": asof, "cache_hit": cache_hit},
         },
         headers={"Cache-Control": "no-store"},
     )
