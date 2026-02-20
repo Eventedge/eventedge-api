@@ -59,7 +59,14 @@ from pydantic import BaseModel, Field
 
 from .db import get_conn
 from .regime import build_regime
-from .snapshots import get_snapshot
+from .snapshots import (
+    extract_funding,
+    extract_liquidations,
+    extract_price,
+    fmt_pct,
+    fmt_usd,
+    get_snapshot,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -109,6 +116,7 @@ class CapResponse(BaseModel):
 CAP_REQUIRED_SCOPE: Dict[str, str] = {
     "core.asset.snapshot": "read:core.asset.snapshot",
     "macro.regime.snapshot": "read:macro.regime.snapshot",
+    "macro.pillars.status": "read:macro.pillars.status",
 }
 
 
@@ -349,15 +357,168 @@ def _dispatch_macro_regime_snapshot(input_data: Dict[str, Any]) -> Dict[str, Any
     }
 
 
+def _dispatch_macro_pillars_status(input_data: Dict[str, Any]) -> Dict[str, Any]:
+    """Macro pillars status — deterministic proxy from live snapshots.
+
+    Five pillars: rates, usd, liquidity, risk, crypto.
+    Returns "unknown" for pillars without a live data source (rates, usd).
+    """
+    # Fetch available snapshots
+    price_snap = get_snapshot("coingecko:price_simple:usd:bitcoin")
+    funding_snap = get_snapshot("coinglass:oi_weighted_funding:BTC")
+    liq_snap = get_snapshot("coinglass:liquidations:BTC")
+
+    price, chg24 = extract_price(price_snap["payload"]) if price_snap else (None, None)
+    funding_pct = extract_funding(funding_snap["payload"]) if funding_snap else None
+    liq = extract_liquidations(liq_snap["payload"]) if liq_snap else {}
+    liq_total = liq.get("total_usd")
+    liq_long_pct = liq.get("long_pct")
+
+    # ---- rates pillar: no data source yet ----
+    rates = {
+        "key": "rates",
+        "label": "Rates",
+        "status": "unknown",
+        "value": None,
+        "delta": None,
+        "note": "No rates data source available",
+    }
+
+    # ---- usd pillar: no data source yet ----
+    usd = {
+        "key": "usd",
+        "label": "USD",
+        "status": "unknown",
+        "value": None,
+        "delta": None,
+        "note": "No USD index data source available",
+    }
+
+    # ---- liquidity pillar: liq skew + vol proxy ----
+    if liq_total is not None and liq_long_pct is not None:
+        if liq_long_pct >= 70:
+            liq_status = "red"
+            liq_note = "Fragile — heavy long liquidations"
+        elif liq_long_pct <= 40:
+            liq_status = "green"
+            liq_note = "Healthy — balanced or short-heavy liqs"
+        else:
+            liq_status = "yellow"
+            liq_note = "Moderate liq skew"
+        liquidity = {
+            "key": "liquidity",
+            "label": "Liquidity",
+            "status": liq_status,
+            "value": fmt_usd(liq_total),
+            "delta": f"{fmt_pct(liq_long_pct, 0, signed=False)} long",
+            "note": liq_note,
+        }
+    else:
+        liquidity = {
+            "key": "liquidity",
+            "label": "Liquidity",
+            "status": "unknown",
+            "value": None,
+            "delta": None,
+            "note": "Liquidation data unavailable",
+        }
+
+    # ---- risk pillar: BTC 24h change as risk-on/off proxy ----
+    if chg24 is not None:
+        if chg24 >= 2.0:
+            risk_status = "green"
+            risk_note = "Risk-on — strong BTC momentum"
+        elif chg24 <= -2.0:
+            risk_status = "red"
+            risk_note = "Risk-off — significant BTC drawdown"
+        elif chg24 <= -0.5:
+            risk_status = "yellow"
+            risk_note = "Mild risk-off tone"
+        else:
+            risk_status = "yellow"
+            risk_note = "Neutral risk posture"
+        risk = {
+            "key": "risk",
+            "label": "Risk",
+            "status": risk_status,
+            "value": fmt_usd(price) if price else None,
+            "delta": fmt_pct(chg24),
+            "note": risk_note,
+        }
+    else:
+        risk = {
+            "key": "risk",
+            "label": "Risk",
+            "status": "unknown",
+            "value": None,
+            "delta": None,
+            "note": "BTC price data unavailable",
+        }
+
+    # ---- crypto pillar: funding + liq skew as crowding/fragility proxy ----
+    if funding_pct is not None:
+        if funding_pct >= 0.10:
+            crypto_status = "red"
+            crypto_note = "Crowded longs — elevated funding"
+        elif funding_pct <= -0.02:
+            crypto_status = "green"
+            crypto_note = "Shorts dominant — contrarian bullish"
+        else:
+            crypto_status = "yellow"
+            crypto_note = "Neutral funding"
+        crypto = {
+            "key": "crypto",
+            "label": "Crypto",
+            "status": crypto_status,
+            "value": fmt_pct(funding_pct, 3),
+            "delta": f"{fmt_pct(liq_long_pct, 0, signed=False)} long liqs" if liq_long_pct is not None else None,
+            "note": crypto_note,
+        }
+    else:
+        crypto = {
+            "key": "crypto",
+            "label": "Crypto",
+            "status": "unknown",
+            "value": None,
+            "delta": None,
+            "note": "Funding data unavailable",
+        }
+
+    pillars = [rates, usd, liquidity, risk, crypto]
+
+    # ---- summary: deterministic 1-2 line text ----
+    known = [p for p in pillars if p["status"] != "unknown"]
+    red_count = sum(1 for p in known if p["status"] == "red")
+    green_count = sum(1 for p in known if p["status"] == "green")
+
+    if not known:
+        summary = "Insufficient data — all pillars unknown."
+    elif red_count >= 2:
+        summary = f"{red_count} pillars flagged red — macro headwinds."
+    elif green_count >= 2:
+        summary = f"{green_count} pillars green — macro tailwinds."
+    else:
+        summary = "Mixed signals — no dominant macro bias."
+
+    asof = _now_iso()
+    return {
+        "pillars": pillars,
+        "summary": summary,
+        "asof": asof,
+    }
+
+
 CAPABILITY_HANDLERS = {
     "core.asset.snapshot": _dispatch_core_asset_snapshot,
     "macro.regime.snapshot": _dispatch_macro_regime_snapshot,
+    "macro.pillars.status": _dispatch_macro_pillars_status,
 }
 
 # Default TTL per cap (seconds).  Caps not listed here are not cached.
 CAP_DEFAULT_TTL: Dict[str, int] = {
     "core.asset.snapshot": 30,
     "macro.regime.snapshot": 120,
+    "macro.pillars.status": 300,
 }
 
 
