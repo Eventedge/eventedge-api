@@ -5,7 +5,7 @@ import json
 from datetime import datetime, timezone
 from typing import Any, Dict
 
-from fastapi import FastAPI, Query
+from fastapi import FastAPI, Query, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 
@@ -13,7 +13,12 @@ from .fear_greed import get_fear_greed
 from .paper import build_paper_summary
 from .regime import build_regime
 from .alerts import build_alerts_live
-from .health_services import build_health_services
+from .health_services import (
+    build_health_services,
+    ingest_heartbeat,
+    HEARTBEAT_INGEST_SECRET,
+    _ALLOWED_SERVICES,
+)
 from .telemetry_overview import build_telemetry_overview
 from .telemetry_summary import build_telemetry_summary
 from .telemetry_users import build_telemetry_users
@@ -103,6 +108,43 @@ def admin_health_services():
             },
             status_code=200,
             headers={"Cache-Control": "no-store"},
+        )
+
+
+@app.post("/api/v1/admin/health/heartbeat")
+async def admin_health_heartbeat(request: Request):
+    # Auth: shared secret via header
+    secret = request.headers.get("X-Heartbeat-Secret", "")
+    if not HEARTBEAT_INGEST_SECRET or secret != HEARTBEAT_INGEST_SECRET:
+        return JSONResponse({"ok": False, "error": "unauthorized"}, status_code=401)
+
+    try:
+        body = await request.json()
+    except Exception:
+        return JSONResponse({"ok": False, "error": "invalid JSON"}, status_code=400)
+
+    service_name = (body.get("service_name") or "").strip()
+    if not service_name or len(service_name) > 64:
+        return JSONResponse(
+            {"ok": False, "error": "service_name required (1-64 chars)"},
+            status_code=400,
+        )
+
+    if service_name not in _ALLOWED_SERVICES:
+        return JSONResponse(
+            {"ok": False, "error": f"service '{service_name}' not in allowlist"},
+            status_code=403,
+        )
+
+    meta = body.get("meta") if isinstance(body.get("meta"), dict) else None
+
+    try:
+        result = ingest_heartbeat(service_name, meta)
+        return JSONResponse(result, status_code=200)
+    except Exception:
+        return JSONResponse(
+            {"ok": False, "error": "DB upsert failed"},
+            status_code=500,
         )
 
 

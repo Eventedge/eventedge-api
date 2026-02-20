@@ -1,13 +1,12 @@
-"""GET /api/v1/admin/health/services — read service_heartbeats table.
+"""service_heartbeats — read + ingest helpers.
 
-Returns status buckets:
-  up    — last_seen_at within STALE_THRESHOLD_S (default 300s)
-  stale — last_seen_at within DOWN_THRESHOLD_S  (default 1800s)
-  down  — older than DOWN_THRESHOLD_S or no row at all
+GET  /api/v1/admin/health/services  — read all rows (existing)
+POST /api/v1/admin/health/heartbeat — remote service heartbeat ingest (OPS-ACP-003)
 """
 
 from __future__ import annotations
 
+import json
 import os
 from datetime import datetime, timezone
 from typing import Any
@@ -16,6 +15,11 @@ from .db import get_conn
 
 STALE_S = int(os.getenv("HEALTH_STALE_THRESHOLD_S", "300"))
 DOWN_S = int(os.getenv("HEALTH_DOWN_THRESHOLD_S", "1800"))
+
+HEARTBEAT_INGEST_SECRET = os.getenv("HEARTBEAT_INGEST_SECRET", "")
+
+# v1 allowlist — only these service names may write via the HTTP endpoint.
+_ALLOWED_SERVICES: set[str] = {"acp-adapter"}
 
 
 def _status(age_seconds: float) -> str:
@@ -75,3 +79,23 @@ def build_health_services() -> dict[str, Any]:
         "thresholds": {"stale_s": STALE_S, "down_s": DOWN_S},
         "services": services,
     }
+
+
+def ingest_heartbeat(service_name: str, meta: dict | None) -> dict[str, Any]:
+    """Upsert a row into service_heartbeats for a remote service."""
+    now = datetime.now(timezone.utc)
+    meta_json = json.dumps(meta or {})
+
+    with get_conn() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                "INSERT INTO service_heartbeats(service_name, last_seen_at, meta) "
+                "VALUES (%s, NOW(), %s::jsonb) "
+                "ON CONFLICT (service_name) "
+                "DO UPDATE SET last_seen_at = EXCLUDED.last_seen_at, "
+                "             meta = EXCLUDED.meta",
+                (service_name, meta_json),
+            )
+        conn.commit()
+
+    return {"ok": True, "service_name": service_name, "ts": now.isoformat()}
