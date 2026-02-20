@@ -1,4 +1,4 @@
-"""HypePipe endpoints (HP-001 / HP-002 / HP-003).
+"""HypePipe endpoints (HP-001 / HP-002 / HP-003 / HP-006).
 
 Provides:
   GET  /api/v1/hypepipe/health  — liveness probe (no auth)
@@ -17,13 +17,19 @@ Cache (HP-003 — in-memory TTL):
   - Default TTL 30s.  Override via opts.freshness_s (clamped to TTL).
   - Disable entirely: HYPEPIPE_CACHE_DISABLE=1
 
+Write caps (HP-006):
+  - alert.emit: enqueues agent events into hypepipe_agent_events table.
+  - Write caps require tier in {orchestrator, paper} (readonly denied).
+  - Write caps are never cached.
+
 Audit:
   - Every /cap call logs to hypepipe_audit_events table.
-  - Columns: policy_version, deny_reason, asof, cache_hit.
+  - Columns: policy_version, deny_reason, asof, cache_hit, action_summary.
 
 Deny reason codes:
   missing_header | missing_token | invalid_token | expired
-  agent_mismatch | scope_denied  | unknown_cap
+  agent_mismatch | scope_denied  | unknown_cap | tier_denied
+  | invalid_input
 
 Dev token helper (ops-only, NOT an endpoint):
   python3 -c "
@@ -117,6 +123,12 @@ CAP_REQUIRED_SCOPE: Dict[str, str] = {
     "core.asset.snapshot": "read:core.asset.snapshot",
     "macro.regime.snapshot": "read:macro.regime.snapshot",
     "macro.pillars.status": "read:macro.pillars.status",
+    "alert.emit": "write:alert.emit",
+}
+
+# Write caps require tier in this set (readonly is denied).
+_WRITE_CAPS: Dict[str, set] = {
+    "alert.emit": {"orchestrator", "paper"},
 }
 
 
@@ -226,7 +238,8 @@ CREATE TABLE IF NOT EXISTS hypepipe_audit_events (
     policy_version  TEXT,
     deny_reason     TEXT,
     asof            TEXT,
-    cache_hit       BOOLEAN
+    cache_hit       BOOLEAN,
+    action_summary  TEXT
 );
 """
 
@@ -235,6 +248,7 @@ _MIGRATE_COLUMNS_SQL = [
     "ALTER TABLE hypepipe_audit_events ADD COLUMN IF NOT EXISTS deny_reason TEXT",
     "ALTER TABLE hypepipe_audit_events ADD COLUMN IF NOT EXISTS asof TEXT",
     "ALTER TABLE hypepipe_audit_events ADD COLUMN IF NOT EXISTS cache_hit BOOLEAN",
+    "ALTER TABLE hypepipe_audit_events ADD COLUMN IF NOT EXISTS action_summary TEXT",
 ]
 
 
@@ -266,6 +280,7 @@ def _log_audit(
     deny_reason: Optional[str] = None,
     asof: Optional[str] = None,
     cache_hit: Optional[bool] = None,
+    action_summary: Optional[str] = None,
 ) -> None:
     try:
         _ensure_audit_table()
@@ -274,10 +289,12 @@ def _log_audit(
                 cur.execute(
                     """INSERT INTO hypepipe_audit_events
                        (agent_id, user_id, cap, request_id, trace_id, decision,
-                        latency_ms, policy_version, deny_reason, asof, cache_hit)
-                       VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)""",
+                        latency_ms, policy_version, deny_reason, asof, cache_hit,
+                        action_summary)
+                       VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)""",
                     (agent_id, user_id, cap, request_id, trace_id, decision,
-                     latency_ms, policy_version, deny_reason, asof, cache_hit),
+                     latency_ms, policy_version, deny_reason, asof, cache_hit,
+                     action_summary),
                 )
             conn.commit()
     except Exception:
@@ -508,10 +525,119 @@ def _dispatch_macro_pillars_status(input_data: Dict[str, Any]) -> Dict[str, Any]
     }
 
 
+# ---------------------------------------------------------------------------
+# Agent event queue table (HP-006)
+# ---------------------------------------------------------------------------
+
+_AGENT_EVENTS_TABLE_ENSURED = False
+
+_CREATE_AGENT_EVENTS_SQL = """
+CREATE TABLE IF NOT EXISTS hypepipe_agent_events (
+    id          BIGSERIAL PRIMARY KEY,
+    ts          TIMESTAMPTZ NOT NULL DEFAULT now(),
+    agent_id    TEXT NOT NULL,
+    trace_id    TEXT NOT NULL,
+    kind        TEXT NOT NULL,
+    title       TEXT NOT NULL,
+    body        TEXT NOT NULL,
+    severity    TEXT NOT NULL DEFAULT 'low',
+    target_type TEXT NOT NULL,
+    target_value TEXT,
+    meta        JSONB,
+    status      TEXT NOT NULL DEFAULT 'pending'
+);
+"""
+
+
+def _ensure_agent_events_table() -> None:
+    global _AGENT_EVENTS_TABLE_ENSURED
+    if _AGENT_EVENTS_TABLE_ENSURED:
+        return
+    try:
+        with get_conn() as conn:
+            with conn.cursor() as cur:
+                cur.execute(_CREATE_AGENT_EVENTS_SQL)
+            conn.commit()
+        _AGENT_EVENTS_TABLE_ENSURED = True
+    except Exception:
+        logger.warning("Failed to ensure hypepipe_agent_events table", exc_info=True)
+
+
+_ALERT_EMIT_MAX_TEXT = 8192
+_ALERT_EMIT_VALID_KINDS = {"digest", "card", "alert"}
+_ALERT_EMIT_VALID_SEVERITIES = {"low", "medium", "high"}
+_ALERT_EMIT_VALID_TARGET_TYPES = {"channel", "user", "admin"}
+
+
+def _dispatch_alert_emit(input_data: Dict[str, Any], *, agent_id: str, trace_id: str) -> Dict[str, Any]:
+    """Enqueue an agent alert event for alertd consumption.
+
+    Validates input, inserts into hypepipe_agent_events, returns event_id.
+    """
+    kind = str(input_data.get("kind", "")).lower()
+    if kind not in _ALERT_EMIT_VALID_KINDS:
+        raise ValueError(f"kind must be one of {sorted(_ALERT_EMIT_VALID_KINDS)}")
+
+    title = str(input_data.get("title", "")).strip()
+    if not title:
+        raise ValueError("title is required and must be non-empty")
+
+    text = str(input_data.get("text", "")).strip()
+    if not text:
+        raise ValueError("text is required and must be non-empty")
+    if len(text) > _ALERT_EMIT_MAX_TEXT:
+        raise ValueError(f"text exceeds max length ({_ALERT_EMIT_MAX_TEXT} chars)")
+
+    severity = str(input_data.get("severity", "low")).lower()
+    if severity not in _ALERT_EMIT_VALID_SEVERITIES:
+        severity = "low"
+
+    target = input_data.get("target") or {}
+    if not isinstance(target, dict):
+        raise ValueError("target must be an object with type and value")
+    target_type = str(target.get("type", "")).lower()
+    if target_type not in _ALERT_EMIT_VALID_TARGET_TYPES:
+        raise ValueError(f"target.type must be one of {sorted(_ALERT_EMIT_VALID_TARGET_TYPES)}")
+    target_value = target.get("value")
+    if target_value is not None:
+        target_value = str(target_value)
+
+    meta = input_data.get("meta")
+
+    _ensure_agent_events_table()
+
+    ts = _now_iso()
+    event_id: Optional[int] = None
+    with get_conn() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """INSERT INTO hypepipe_agent_events
+                   (agent_id, trace_id, kind, title, body, severity,
+                    target_type, target_value, meta, status)
+                   VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, 'pending')
+                   RETURNING id""",
+                (agent_id, trace_id, kind, title, text, severity,
+                 target_type, target_value,
+                 json.dumps(meta) if meta else None),
+            )
+            row = cur.fetchone()
+            if row:
+                event_id = row[0]
+        conn.commit()
+
+    return {
+        "enqueued": True,
+        "event_id": event_id,
+        "ts": ts,
+        "asof": ts,
+    }
+
+
 CAPABILITY_HANDLERS = {
     "core.asset.snapshot": _dispatch_core_asset_snapshot,
     "macro.regime.snapshot": _dispatch_macro_regime_snapshot,
     "macro.pillars.status": _dispatch_macro_pillars_status,
+    "alert.emit": None,  # special dispatch — see _dispatch_alert_emit
 }
 
 # Default TTL per cap (seconds).  Caps not listed here are not cached.
@@ -633,8 +759,7 @@ def hypepipe_cap(
         )
 
     # --- Unknown cap ---
-    handler = CAPABILITY_HANDLERS.get(body.cap)
-    if handler is None:
+    if body.cap not in CAPABILITY_HANDLERS:
         latency_ms = int((time.monotonic() - t0) * 1000)
         _log_audit(
             agent_id=auth.agent_id,
@@ -657,7 +782,111 @@ def hypepipe_cap(
             },
         )
 
-    # --- Cache lookup ---
+    # --- Tier enforcement for write caps ---
+    allowed_tiers = _WRITE_CAPS.get(body.cap)
+    if allowed_tiers and auth.tier not in allowed_tiers:
+        latency_ms = int((time.monotonic() - t0) * 1000)
+        _log_audit(
+            agent_id=auth.agent_id,
+            user_id=body.ctx.user_id,
+            cap=body.cap,
+            request_id=body.request_id,
+            trace_id=trace_id,
+            decision="deny",
+            latency_ms=latency_ms,
+            policy_version=policy_version,
+            deny_reason="tier_denied",
+        )
+        return JSONResponse(
+            status_code=403,
+            content={
+                "ok": False,
+                "error": f"tier_denied: {body.cap} requires tier in {sorted(allowed_tiers)}",
+                "meta": {"cap": body.cap, "trace_id": trace_id, "asof": None, "cache_hit": None},
+            },
+        )
+
+    # --- Write cap dispatch (alert.emit) ---
+    if body.cap in _WRITE_CAPS:
+        try:
+            result = _dispatch_alert_emit(
+                body.input, agent_id=auth.agent_id, trace_id=trace_id,
+            )
+        except ValueError as exc:
+            latency_ms = int((time.monotonic() - t0) * 1000)
+            _log_audit(
+                agent_id=auth.agent_id,
+                user_id=body.ctx.user_id,
+                cap=body.cap,
+                request_id=body.request_id,
+                trace_id=trace_id,
+                decision="deny",
+                latency_ms=latency_ms,
+                policy_version=policy_version,
+                deny_reason="invalid_input",
+            )
+            return JSONResponse(
+                status_code=400,
+                content={
+                    "ok": False,
+                    "error": str(exc),
+                    "meta": {"cap": body.cap, "trace_id": trace_id, "asof": None, "cache_hit": None},
+                },
+            )
+        except Exception:
+            logger.exception("Write cap handler failed: cap=%s", body.cap)
+            latency_ms = int((time.monotonic() - t0) * 1000)
+            _log_audit(
+                agent_id=auth.agent_id,
+                user_id=body.ctx.user_id,
+                cap=body.cap,
+                request_id=body.request_id,
+                trace_id=trace_id,
+                decision="error",
+                latency_ms=latency_ms,
+                policy_version=policy_version,
+            )
+            return JSONResponse(
+                status_code=500,
+                content={
+                    "ok": False,
+                    "error": "Internal capability error",
+                    "meta": {"cap": body.cap, "trace_id": trace_id, "asof": None, "cache_hit": False},
+                },
+            )
+
+        asof = result.get("asof") if isinstance(result, dict) else None
+        target = body.input.get("target") or {}
+        action_summary = (
+            f"alert.emit kind={body.input.get('kind')} "
+            f"target={target.get('type')} value={target.get('value')} "
+            f"len={len(str(body.input.get('text', '')))}"
+        )
+        latency_ms = int((time.monotonic() - t0) * 1000)
+        _log_audit(
+            agent_id=auth.agent_id,
+            user_id=body.ctx.user_id,
+            cap=body.cap,
+            request_id=body.request_id,
+            trace_id=trace_id,
+            decision="allow",
+            latency_ms=latency_ms,
+            policy_version=policy_version,
+            asof=asof,
+            cache_hit=False,
+            action_summary=action_summary,
+        )
+        return JSONResponse(
+            content={
+                "ok": True,
+                "data": result,
+                "meta": {"cap": body.cap, "trace_id": trace_id, "asof": asof, "cache_hit": False},
+            },
+            headers={"Cache-Control": "no-store"},
+        )
+
+    # --- Cache lookup (read caps only) ---
+    handler = CAPABILITY_HANDLERS[body.cap]
     default_ttl = CAP_DEFAULT_TTL.get(body.cap, 0)
     cache_hit: Optional[bool] = None
     result: Optional[Dict[str, Any]] = None
