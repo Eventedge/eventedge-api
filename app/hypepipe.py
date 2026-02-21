@@ -1,4 +1,4 @@
-"""HypePipe endpoints (HP-001 / HP-002 / HP-003 / HP-006 / HP-007).
+"""HypePipe endpoints (HP-001 / HP-002 / HP-003 / HP-006 / HP-007 / HP-008).
 
 Provides:
   GET  /api/v1/hypepipe/health  — liveness probe (no auth)
@@ -125,6 +125,8 @@ CAP_REQUIRED_SCOPE: Dict[str, str] = {
     "macro.pillars.status": "read:macro.pillars.status",
     "pm.markets.movers": "read:pm.markets.movers",
     "pm.divergence.watchlist": "read:pm.divergence.watchlist",
+    "ta.setups.rank": "read:ta.setups.rank",
+    "ta.signals.snapshot": "read:ta.signals.snapshot",
     "alert.emit": "write:alert.emit",
 }
 
@@ -780,12 +782,180 @@ def _safe_float(v: Any) -> Optional[float]:
         return None
 
 
+# ---------------------------------------------------------------------------
+# Technical Analysis caps (HP-008)
+# ---------------------------------------------------------------------------
+
+_TA_VALID_TIMEFRAMES = {"1h", "4h", "1d"}
+_TA_VALID_UNIVERSES = {"majors", "all"}
+_TA_VALID_SETUP_TYPES = {"breakout", "reversion", "trend", "volatility"}
+_TA_VALID_TREND_STATES = {"bull", "bear", "neutral", "unknown"}
+_TA_VALID_EMA_STATES = {"above", "below", "cross", "unknown"}
+_TA_VALID_RSI_STATES = {"overbought", "oversold", "neutral", "unknown"}
+_TA_VALID_VOL_STATES = {"squeeze", "expand", "neutral", "unknown"}
+
+# Snapshot keys the handlers attempt, in priority order.
+_TA_SETUPS_RANK_KEYS = [
+    "ta:setups_rank",
+    "edge:ta_setups_rank",
+]
+
+_TA_SIGNALS_KEY_TEMPLATES = [
+    "ta:signals:{asset}:{tf}",
+    "edge:ta_signals:{asset}:{tf}",
+]
+
+
+def _dispatch_ta_setups_rank(input_data: Dict[str, Any]) -> Dict[str, Any]:
+    """TA setups ranked by score — reads from EdgeCore TA snapshots if available.
+
+    Falls back to an honest empty list when no snapshot data exists.
+    """
+    timeframe = str(input_data.get("timeframe", "4h"))
+    if timeframe not in _TA_VALID_TIMEFRAMES:
+        timeframe = "4h"
+    universe = str(input_data.get("universe", "majors")).lower()
+    if universe not in _TA_VALID_UNIVERSES:
+        universe = "majors"
+    limit = input_data.get("limit")
+    if limit is not None:
+        limit = max(1, min(int(limit), 50))
+    else:
+        limit = 10
+
+    items: List[Dict[str, Any]] = []
+    data_found = False
+
+    for key in _TA_SETUPS_RANK_KEYS:
+        snap = get_snapshot(key)
+        if not snap:
+            continue
+        data_found = True
+        payload = snap.get("payload") or {}
+        setups = payload.get("data", payload.get("items", []))
+        if not isinstance(setups, list):
+            continue
+        for s in setups:
+            if not isinstance(s, dict):
+                continue
+            # Filter by timeframe if the snapshot contains mixed timeframes
+            s_tf = str(s.get("timeframe", timeframe))
+            if s_tf != timeframe:
+                continue
+            setup_type = str(s.get("setup_type", "trend")).lower()
+            if setup_type not in _TA_VALID_SETUP_TYPES:
+                setup_type = "trend"
+            items.append({
+                "asset": str(s.get("asset", s.get("symbol", ""))).upper(),
+                "setup_type": setup_type,
+                "score": _safe_float(s.get("score")) or 0.0,
+                "trigger": s.get("trigger") or None,
+                "invalidation": s.get("invalidation") or None,
+                "targets": s.get("targets") if isinstance(s.get("targets"), list) else [],
+                "notes": s.get("notes") if isinstance(s.get("notes"), list) else [],
+            })
+        break  # use first available snapshot source
+
+    # Sort by score descending
+    items.sort(key=lambda x: x.get("score", 0), reverse=True)
+    items = items[:limit]
+
+    asof = _now_iso()
+    result: Dict[str, Any] = {
+        "timeframe": timeframe,
+        "items": items,
+        "asof": asof,
+    }
+    if not data_found:
+        result["note"] = "No TA setups data available yet — EdgeCore TA collectors pending."
+    return result
+
+
+def _dispatch_ta_signals_snapshot(input_data: Dict[str, Any]) -> Dict[str, Any]:
+    """TA signals snapshot for a single asset+timeframe.
+
+    Reads from EdgeCore TA snapshots if present. Returns all-unknown signals
+    with an honest note when no data exists.
+    """
+    asset = str(input_data.get("asset", "BTC")).upper()
+    timeframe = str(input_data.get("timeframe", "4h"))
+    if timeframe not in _TA_VALID_TIMEFRAMES:
+        timeframe = "4h"
+
+    # Unknown-state defaults
+    signals: Dict[str, Any] = {
+        "trend": "unknown",
+        "ema": {"fast": None, "slow": None, "state": "unknown"},
+        "rsi": {"value": None, "state": "unknown"},
+        "volatility": {"state": "unknown"},
+    }
+
+    data_found = False
+
+    for tmpl in _TA_SIGNALS_KEY_TEMPLATES:
+        key = tmpl.format(asset=asset, tf=timeframe)
+        snap = get_snapshot(key)
+        if not snap:
+            continue
+        data_found = True
+        payload = snap.get("payload") or {}
+        sig_data = payload.get("data", payload.get("signals", {}))
+        if not isinstance(sig_data, dict):
+            continue
+
+        # Trend
+        trend = str(sig_data.get("trend", "unknown")).lower()
+        signals["trend"] = trend if trend in _TA_VALID_TREND_STATES else "unknown"
+
+        # EMA
+        ema_raw = sig_data.get("ema") or {}
+        if isinstance(ema_raw, dict):
+            ema_state = str(ema_raw.get("state", "unknown")).lower()
+            signals["ema"] = {
+                "fast": _safe_float(ema_raw.get("fast")),
+                "slow": _safe_float(ema_raw.get("slow")),
+                "state": ema_state if ema_state in _TA_VALID_EMA_STATES else "unknown",
+            }
+
+        # RSI
+        rsi_raw = sig_data.get("rsi") or {}
+        if isinstance(rsi_raw, dict):
+            rsi_state = str(rsi_raw.get("state", "unknown")).lower()
+            signals["rsi"] = {
+                "value": _safe_float(rsi_raw.get("value")),
+                "state": rsi_state if rsi_state in _TA_VALID_RSI_STATES else "unknown",
+            }
+
+        # Volatility
+        vol_raw = sig_data.get("volatility") or {}
+        if isinstance(vol_raw, dict):
+            vol_state = str(vol_raw.get("state", "unknown")).lower()
+            signals["volatility"] = {
+                "state": vol_state if vol_state in _TA_VALID_VOL_STATES else "unknown",
+            }
+
+        break  # use first available snapshot source
+
+    asof = _now_iso()
+    result: Dict[str, Any] = {
+        "asset": asset,
+        "timeframe": timeframe,
+        "signals": signals,
+        "asof": asof,
+    }
+    if not data_found:
+        result["note"] = "No TA signals data available yet — EdgeCore TA collectors pending."
+    return result
+
+
 CAPABILITY_HANDLERS = {
     "core.asset.snapshot": _dispatch_core_asset_snapshot,
     "macro.regime.snapshot": _dispatch_macro_regime_snapshot,
     "macro.pillars.status": _dispatch_macro_pillars_status,
     "pm.markets.movers": _dispatch_pm_markets_movers,
     "pm.divergence.watchlist": _dispatch_pm_divergence_watchlist,
+    "ta.setups.rank": _dispatch_ta_setups_rank,
+    "ta.signals.snapshot": _dispatch_ta_signals_snapshot,
     "alert.emit": None,  # special dispatch — see _dispatch_alert_emit
 }
 
@@ -796,6 +966,8 @@ CAP_DEFAULT_TTL: Dict[str, int] = {
     "macro.pillars.status": 300,
     "pm.markets.movers": 120,
     "pm.divergence.watchlist": 300,
+    "ta.setups.rank": 120,
+    "ta.signals.snapshot": 120,
 }
 
 
