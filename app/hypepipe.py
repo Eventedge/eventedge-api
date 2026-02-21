@@ -1,4 +1,4 @@
-"""HypePipe endpoints (HP-001 / HP-002 / HP-003 / HP-006).
+"""HypePipe endpoints (HP-001 / HP-002 / HP-003 / HP-006 / HP-007).
 
 Provides:
   GET  /api/v1/hypepipe/health  — liveness probe (no auth)
@@ -123,6 +123,8 @@ CAP_REQUIRED_SCOPE: Dict[str, str] = {
     "core.asset.snapshot": "read:core.asset.snapshot",
     "macro.regime.snapshot": "read:macro.regime.snapshot",
     "macro.pillars.status": "read:macro.pillars.status",
+    "pm.markets.movers": "read:pm.markets.movers",
+    "pm.divergence.watchlist": "read:pm.divergence.watchlist",
     "alert.emit": "write:alert.emit",
 }
 
@@ -633,10 +635,157 @@ def _dispatch_alert_emit(input_data: Dict[str, Any], *, agent_id: str, trace_id:
     }
 
 
+# ---------------------------------------------------------------------------
+# Prediction Markets caps (HP-007)
+# ---------------------------------------------------------------------------
+
+_PM_SNAPSHOT_KEYS = [
+    "polymarket:active_markets",
+    "kalshi:macro_markets",
+    "kalshi:crypto_markets",
+]
+
+_PM_CATEGORY_MAP = {
+    "crypto": "crypto",
+    "macro": "macro",
+    "politics": "politics",
+}
+
+_PM_VALID_WINDOWS = {"1h", "24h", "7d"}
+
+
+def _classify_pm_category(market: Dict[str, Any]) -> str:
+    cat = str(market.get("category", "")).lower()
+    return _PM_CATEGORY_MAP.get(cat, "other")
+
+
+def _source_from_key(dataset_key: str) -> str:
+    if dataset_key.startswith("polymarket:"):
+        return "polymarket"
+    if dataset_key.startswith("kalshi:"):
+        return "kalshi"
+    return "unknown"
+
+
+def _dispatch_pm_markets_movers(input_data: Dict[str, Any]) -> Dict[str, Any]:
+    """PM movers — reads from EdgeCore PM snapshots if available.
+
+    Falls back to an honest empty list with a note when data is absent.
+    """
+    window = str(input_data.get("window", "24h"))
+    if window not in _PM_VALID_WINDOWS:
+        window = "24h"
+    limit = input_data.get("limit")
+    if limit is not None:
+        limit = max(1, min(int(limit), 100))
+    else:
+        limit = 20
+
+    items: List[Dict[str, Any]] = []
+    data_found = False
+
+    for key in _PM_SNAPSHOT_KEYS:
+        snap = get_snapshot(key)
+        if not snap:
+            continue
+        data_found = True
+        payload = snap.get("payload") or {}
+        markets = payload.get("data", payload.get("markets", []))
+        if not isinstance(markets, list):
+            continue
+        source = _source_from_key(key)
+        for m in markets:
+            if not isinstance(m, dict):
+                continue
+            items.append({
+                "source": source,
+                "market_id": str(m.get("market_id", m.get("id", ""))),
+                "title": str(m.get("title", m.get("question", ""))),
+                "prob": _safe_float(m.get("prob", m.get("last_price", m.get("yes_price")))),
+                "prob_change": _safe_float(m.get("prob_change", m.get("price_change"))),
+                "volume": _safe_float(m.get("volume")),
+                "category": _classify_pm_category(m),
+                "link": m.get("link", m.get("url")) or None,
+            })
+
+    # Sort by absolute prob_change descending (biggest movers first)
+    items.sort(key=lambda x: abs(x.get("prob_change") or 0), reverse=True)
+    items = items[:limit]
+
+    asof = _now_iso()
+    result: Dict[str, Any] = {
+        "window": window,
+        "items": items,
+        "asof": asof,
+    }
+    if not data_found:
+        result["note"] = "No PM snapshot data available yet — EdgeCore PM collectors pending."
+    return result
+
+
+def _dispatch_pm_divergence_watchlist(input_data: Dict[str, Any]) -> Dict[str, Any]:
+    """PM divergence watchlist — reads from EdgeCore PM snapshots if available.
+
+    Compares Polymarket vs Kalshi probabilities on overlapping topics.
+    Falls back to an honest empty list with a note when data is absent.
+    """
+    limit = input_data.get("limit")
+    if limit is not None:
+        limit = max(1, min(int(limit), 50))
+    else:
+        limit = 10
+
+    items: List[Dict[str, Any]] = []
+    data_found = False
+
+    # Attempt to read a pre-computed divergence snapshot
+    div_snap = get_snapshot("edge:pm_divergence")
+    if div_snap:
+        data_found = True
+        payload = div_snap.get("payload") or {}
+        divergences = payload.get("data", payload.get("items", []))
+        if isinstance(divergences, list):
+            for d in divergences:
+                if not isinstance(d, dict):
+                    continue
+                strength_raw = d.get("strength", "low")
+                if strength_raw not in ("low", "mid", "high"):
+                    strength_raw = "low"
+                items.append({
+                    "topic": str(d.get("topic", "")),
+                    "signal": str(d.get("signal", "crowd_vs_market")),
+                    "strength": strength_raw,
+                    "note": str(d.get("note", "")),
+                    "asof": d.get("asof") or _now_iso(),
+                })
+
+    items = items[:limit]
+
+    asof = _now_iso()
+    result: Dict[str, Any] = {
+        "items": items,
+        "asof": asof,
+    }
+    if not data_found:
+        result["note"] = "No PM divergence data available yet — EdgeCore PM collectors pending."
+    return result
+
+
+def _safe_float(v: Any) -> Optional[float]:
+    if v is None:
+        return None
+    try:
+        return float(v)
+    except (TypeError, ValueError):
+        return None
+
+
 CAPABILITY_HANDLERS = {
     "core.asset.snapshot": _dispatch_core_asset_snapshot,
     "macro.regime.snapshot": _dispatch_macro_regime_snapshot,
     "macro.pillars.status": _dispatch_macro_pillars_status,
+    "pm.markets.movers": _dispatch_pm_markets_movers,
+    "pm.divergence.watchlist": _dispatch_pm_divergence_watchlist,
     "alert.emit": None,  # special dispatch — see _dispatch_alert_emit
 }
 
@@ -645,6 +794,8 @@ CAP_DEFAULT_TTL: Dict[str, int] = {
     "core.asset.snapshot": 30,
     "macro.regime.snapshot": 120,
     "macro.pillars.status": 300,
+    "pm.markets.movers": 120,
+    "pm.divergence.watchlist": 300,
 }
 
 
