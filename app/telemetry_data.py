@@ -33,12 +33,15 @@ def _iso(val: Any) -> str | None:
 
 
 
-# TTL lookup (seconds) — synced with bot.py _ec_ttl() fallback values.
+# TTL lookup (seconds) — synced with edgecore/snapshots/keys.py _REGISTRY.
 # key prefix → expected TTL.  Longest prefix match wins.
 _TTL_MAP: dict[str, int] = {
     # CoinGecko
     "coingecko:global": 360,
     "coingecko:price_simple": 360,
+    "coingecko:trending": 900,
+    "coingecko:markets_top": 600,
+    "coingecko:treasury_btc": 21600,
     # CoinGlass
     "coinglass:liquidations": 300,
     "coinglass:funding_rate": 300,
@@ -57,22 +60,67 @@ _TTL_MAP: dict[str, int] = {
     "defillama:chains": 900,
     "defillama:global_tvl": 300,
     "defillama:protocol": 900,
-    # Polymarket / Kalshi
+    "defillama:dex_volume": 900,
+    "defillama:bridge_volume": 900,
+    "defillama:bridge_flows": 1800,
+    "defillama:lending_tvl": 1800,
+    "defillama:l2_comparison": 900,
+    "defillama:stablecoin_mcap": 1800,
+    "defillama:stablecoins_chain": 1800,
+    "defillama:chain_dex": 900,
+    "defillama:chain_fees": 900,
+    "defillama:chain_perps": 900,
+    # Polymarket / Kalshi / PM3
     "polymarket:active_markets": 900,
     "kalshi:macro_markets": 900,
     "kalshi:crypto_markets": 900,
+    "pm3:quotes_poly": 120,
+    "pm3:quotes_kalshi": 120,
     # Etherscan
     "etherscan:gas_oracle": 120,
     "etherscan:balance": 600,
+    "etherscan:contract_verified": 3600,
+    # DEXTools
+    "dextools:hot_pools": 900,
+    "dextools:gainers": 900,
+    "dextools:losers": 900,
+    "dextools:new_pools": 1800,
+    # News
+    "news:feed": 900,
+    # Wallet
+    "wallet:evm_holdings": 300,
+    "wallet:sol_holdings": 300,
     # Alternative.me
     "altme:fear_greed": 1800,
     # EdgeCore internal (regime/sentiment refresh ~3 min)
     "edge:regime": 300,
     "edge:sentiment": 300,
+    # EdgeBank feature vectors (hourly cadence)
+    "edgebank:ta_core": 3600,
+    "edgebank:deriv_core": 3600,
+    "edgebank:pm_core": 3600,
+    "edgebank:macro_core": 3600,
+    "edgebank:quality": 3600,
+    # EdgeMind
+    "edgemind:regime": 3600,
+    "edgemind:router_top_features": 3600,
 }
 
 # Sorted by descending prefix length for longest-prefix match
 _TTL_PREFIXES = sorted(_TTL_MAP.keys(), key=len, reverse=True)
+
+# Active scopes — synced with edgecore/snapshots/keys.py _ACTIVE_SCOPES.
+# Keys not listed here: all scopes active.
+_ACTIVE_SCOPES: dict[str, tuple[str, ...]] = {
+    "coinglass:funding_rate": ("BTC", "ETH"),
+    "coinglass:open_interest": ("BTC", "ETH"),
+    "coinglass:liquidations": ("BTC", "ETH"),
+    "coinglass:oi_weighted_funding": ("BTC", "ETH"),
+    "coinglass:long_short_ratio": ("BTC", "ETH"),
+    "coinglass:top_trader_sentiment": ("BTC", "ETH"),
+    "coingecko:price_simple": ("usd:bitcoin", "usd:ethereum"),
+    "sosovalue:etf_flow": ("btc", "eth", "sol"),
+}
 
 
 def _ttl_for_key(key: str) -> int | None:
@@ -83,13 +131,29 @@ def _ttl_for_key(key: str) -> int | None:
     return None
 
 
-def _classify(age_s: float, ttl_s: int | None) -> str:
-    """Classify freshness: fresh / stale / dead / unknown."""
+def _is_scope_active(key: str) -> bool:
+    """Return whether a scoped key is actively fetched.
+
+    Matches the longest prefix in _ACTIVE_SCOPES and checks whether the
+    scope suffix is in the active set.  Keys without a scope restriction
+    return True.
+    """
+    for prefix, scopes in _ACTIVE_SCOPES.items():
+        if key.startswith(prefix + ":"):
+            scope = key[len(prefix) + 1:]
+            return scope in scopes
+    return True
+
+
+def _classify(age_s: float, ttl_s: int | None, active: bool = True) -> str:
+    """Classify freshness: fresh / stale / dead / disabled / unknown."""
+    if not active:
+        return "disabled"
     if ttl_s is None:
         return "unknown"
-    if age_s <= ttl_s * 2:
+    if age_s <= ttl_s:
         return "fresh"
-    if age_s <= ttl_s * 10:
+    if age_s <= ttl_s * 2:
         return "stale"
     return "dead"
 
@@ -123,12 +187,13 @@ def _edgecore_snapshots(cur: Any) -> dict[str, Any]:
     rows = [(k, ts, age) for k, ts, age in rows if not k.startswith("_cooldown:")]
 
     total = len(rows)
-    counts: dict[str, int] = {"fresh": 0, "stale": 0, "dead": 0, "unknown": 0}
+    counts: dict[str, int] = {"fresh": 0, "stale": 0, "dead": 0, "disabled": 0, "unknown": 0}
     snapshots = []
     for key, updated_at, age_s in rows:
         age = float(age_s or 0)
         ttl = _ttl_for_key(key)
-        status = _classify(age, ttl)
+        active = _is_scope_active(key)
+        status = _classify(age, ttl, active)
         counts[status] += 1
         snapshots.append({
             "key": key,
@@ -144,6 +209,7 @@ def _edgecore_snapshots(cur: Any) -> dict[str, Any]:
         "fresh": counts["fresh"],
         "stale": counts["stale"],
         "dead": counts["dead"],
+        "disabled": counts["disabled"],
         "unknown": counts["unknown"],
         "snapshots": snapshots,
     }
@@ -206,6 +272,7 @@ def build_telemetry_data() -> dict[str, Any]:
                         "fresh": ec["fresh"],
                         "stale": ec["stale"],
                         "dead": ec["dead"],
+                        "disabled": ec["disabled"],
                         "unknown": ec["unknown"],
                         "snapshots": ec["snapshots"],
                     }
