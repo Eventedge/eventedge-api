@@ -30,7 +30,7 @@ def _status(age_seconds: float) -> str:
     return "down"
 
 
-REQUIRED_SERVICES = ("eventedge-bot", "eventedge-alertd")
+REQUIRED_SERVICES = ("eventedge-bot", "alertd")
 
 
 def build_health_services() -> dict[str, Any]:
