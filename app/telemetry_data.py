@@ -120,6 +120,8 @@ _ACTIVE_SCOPES: dict[str, tuple[str, ...]] = {
     "coinglass:top_trader_sentiment": ("BTC", "ETH"),
     "coingecko:price_simple": ("usd:bitcoin", "usd:ethereum"),
     "sosovalue:etf_flow": ("btc", "eth", "sol"),
+    # EdgeBank — TA core (EB-TA-TRACK-002)
+    "edgebank:ta_core": ("BTC", "ETH", "SOL", "HYPE"),
 }
 
 
