@@ -27,7 +27,14 @@ from .telemetry_alerts import build_telemetry_alerts
 from .telemetry_paper import build_telemetry_paper
 from .telemetry_data import build_telemetry_data
 from .telemetry_scanners import build_telemetry_scanners
+from .telemetry_ta_health import build_telemetry_ta_health
+from .telemetry_ta_relevance import build_telemetry_ta_relevance
 from .ops_backup_status import build_backup_status
+from .admin_alert_settings import (
+    build_alert_settings_list,
+    build_alert_settings_get,
+    build_alert_settings_update,
+)
 from .simlab import build_simlab_overview, build_simlab_trades_live
 from .supercard import build_supercard
 from .snapshots import (
@@ -247,6 +254,34 @@ def admin_telemetry_scanners():
         )
 
 
+@app.get("/api/v1/admin/telemetry/ta_health")
+def admin_telemetry_ta_health():
+    try:
+        payload = build_telemetry_ta_health()
+        return json_with_cache(payload, "no-store")
+    except Exception:
+        return JSONResponse(
+            content={"ok": False, "generated_at": now_iso(), "error": "Failed to build TA health"},
+            status_code=200, headers={"Cache-Control": "no-store"},
+        )
+
+
+@app.get("/api/v1/admin/telemetry/ta_relevance")
+def admin_telemetry_ta_relevance(
+    day: str | None = Query(None),
+    horizon: str | None = Query(None),
+    limit: int = Query(20, ge=1, le=100),
+):
+    try:
+        payload = build_telemetry_ta_relevance(day_str=day, horizon=horizon, limit=limit)
+        return json_with_cache(payload, "no-store")
+    except Exception:
+        return JSONResponse(
+            content={"ok": False, "generated_at": now_iso(), "error": "Failed to build TA relevance"},
+            status_code=200, headers={"Cache-Control": "no-store"},
+        )
+
+
 @app.get("/api/v1/admin/ops/backup_status")
 def admin_ops_backup_status():
     try:
@@ -267,6 +302,37 @@ def admin_telemetry_summary():
         status_code=501,
         headers={"Cache-Control": "no-store"},
     )
+
+
+# ---- P5-ALERTS-003: Router alert settings (admin) ----
+
+@app.get("/api/v1/admin/alerts/settings")
+def admin_alerts_settings_list(user_id: str = Query(None)):
+    try:
+        if user_id:
+            payload = build_alert_settings_get(user_id)
+        else:
+            payload = build_alert_settings_list()
+        return json_with_cache(payload, "no-store")
+    except Exception:
+        return JSONResponse(
+            content={"ok": False, "generated_at": now_iso(), "error": "Failed to read alert settings"},
+            status_code=200, headers={"Cache-Control": "no-store"},
+        )
+
+
+@app.post("/api/v1/admin/alerts/settings")
+async def admin_alerts_settings_update(request: Request, user_id: str = Query(...)):
+    try:
+        body = await request.json()
+        payload = build_alert_settings_update(user_id, body)
+        status = 200 if payload.get("ok") else 400
+        return JSONResponse(content=payload, status_code=status, headers={"Cache-Control": "no-store"})
+    except Exception:
+        return JSONResponse(
+            content={"ok": False, "generated_at": now_iso(), "error": "Failed to update alert settings"},
+            status_code=200, headers={"Cache-Control": "no-store"},
+        )
 
 
 @app.get("/api/v1/market/overview")
