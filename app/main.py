@@ -35,6 +35,7 @@ from .admin_alert_settings import (
     build_alert_settings_get,
     build_alert_settings_update,
 )
+from .admin_alert_telemetry import build_delivery_telemetry
 from .simlab import build_simlab_overview, build_simlab_trades_live
 from .supercard import build_supercard
 from .snapshots import (
@@ -331,6 +332,18 @@ async def admin_alerts_settings_update(request: Request, user_id: str = Query(..
     except Exception:
         return JSONResponse(
             content={"ok": False, "generated_at": now_iso(), "error": "Failed to update alert settings"},
+            status_code=200, headers={"Cache-Control": "no-store"},
+        )
+
+
+@app.get("/api/v1/admin/alerts/telemetry")
+def admin_alerts_delivery_telemetry(day: str = Query(None)):
+    try:
+        payload = build_delivery_telemetry(day)
+        return json_with_cache(payload, "no-store")
+    except Exception:
+        return JSONResponse(
+            content={"ok": False, "generated_at": now_iso(), "error": "Failed to read delivery telemetry"},
             status_code=200, headers={"Cache-Control": "no-store"},
         )
 
