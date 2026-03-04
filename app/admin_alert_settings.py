@@ -151,6 +151,26 @@ def build_alert_settings_update(user_id: str, body: dict) -> dict[str, Any]:
     if "channel_telegram" in body:
         current["channel_telegram"] = bool(body["channel_telegram"])
 
+    # Admin quick actions (ALERTS-POLISH-001)
+    if "paused_until" in body:
+        pu = body["paused_until"]
+        if pu is None:
+            current["paused_until"] = None
+        else:
+            try:
+                current["paused_until"] = int(pu)
+            except (ValueError, TypeError):
+                errors.append("paused_until: must be int or null")
+
+    if "fail_streak" in body:
+        try:
+            fs = int(body["fail_streak"])
+            current["fail_streak"] = max(0, fs)
+            if fs == 0:
+                current.pop("last_fail_ts", None)
+        except (ValueError, TypeError):
+            errors.append("fail_streak: must be int")
+
     if errors:
         return {"ok": False, "generated_at": now, "errors": errors}
 

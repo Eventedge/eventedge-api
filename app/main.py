@@ -36,6 +36,7 @@ from .admin_alert_settings import (
     build_alert_settings_update,
 )
 from .admin_alert_telemetry import build_delivery_telemetry
+from .admin_alert_health import build_alert_health
 from .simlab import build_simlab_overview, build_simlab_trades_live
 from .supercard import build_supercard
 from .snapshots import (
@@ -344,6 +345,18 @@ def admin_alerts_delivery_telemetry(day: str = Query(None)):
     except Exception:
         return JSONResponse(
             content={"ok": False, "generated_at": now_iso(), "error": "Failed to read delivery telemetry"},
+            status_code=200, headers={"Cache-Control": "no-store"},
+        )
+
+
+@app.get("/api/v1/admin/alerts/health")
+def admin_alerts_health():
+    try:
+        payload = build_alert_health()
+        return json_with_cache(payload, "no-store")
+    except Exception:
+        return JSONResponse(
+            content={"ok": False, "generated_at": now_iso(), "error": "Failed to read alert health"},
             status_code=200, headers={"Cache-Control": "no-store"},
         )
 
