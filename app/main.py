@@ -38,6 +38,7 @@ from .admin_alert_settings import (
 from .admin_alert_telemetry import build_delivery_telemetry
 from .admin_alert_health import build_alert_health
 from .telemetry_pm_health import build_telemetry_pm_health
+from .telemetry_chartfeed import build_telemetry_chartfeed
 from .telemetry_health_summary import build_health_summary
 from .simlab import build_simlab_overview, build_simlab_trades_live
 from .supercard import build_supercard
@@ -294,6 +295,18 @@ def admin_telemetry_pm_health():
     except Exception:
         return JSONResponse(
             content={"ok": False, "generated_at": now_iso(), "error": "Failed to build PM health"},
+            status_code=200, headers={"Cache-Control": "no-store"},
+        )
+
+
+@app.get("/api/v1/admin/telemetry/chartfeed_health")
+def admin_telemetry_chartfeed_health():
+    try:
+        payload = build_telemetry_chartfeed()
+        return json_with_cache(payload, "no-store")
+    except Exception:
+        return JSONResponse(
+            content={"ok": False, "generated_at": now_iso(), "error": "Failed to build chartfeed health"},
             status_code=200, headers={"Cache-Control": "no-store"},
         )
 
