@@ -57,6 +57,8 @@ from .relevance import (
     build_relevance_now,
     build_relevance_asset,
     build_relevance_explain,
+    build_relevance_presets,
+    build_relevance_preset_view,
 )
 
 
@@ -409,9 +411,9 @@ def admin_alerts_health():
 # Builders handle cache headers (ETag, Last-Modified, 304) internally.
 
 @app.get("/api/v1/relevance/now")
-def relevance_now(request: Request):
+def relevance_now(request: Request, day: str | None = Query(None)):
     try:
-        return build_relevance_now(request)
+        return build_relevance_now(request, day=day)
     except Exception:
         return JSONResponse(
             content={"ok": False, "generated_at": now_iso(), "error": "Failed to read relevance data"},
@@ -419,10 +421,45 @@ def relevance_now(request: Request):
         )
 
 
-@app.get("/api/v1/relevance/explain/{asset}")
-def relevance_explain(request: Request, asset: str, horizon: str | None = Query(None), day: str | None = Query(None)):
+@app.get("/api/v1/relevance/presets")
+def relevance_presets():
     try:
-        return build_relevance_explain(request, asset, horizon, day=day)
+        return build_relevance_presets()
+    except Exception:
+        return JSONResponse(
+            content={"ok": False, "generated_at": now_iso(), "error": "Failed to build presets"},
+            status_code=200, headers={"Cache-Control": "no-store"},
+        )
+
+
+@app.get("/api/v1/relevance/explain/{asset}")
+def relevance_explain(
+    request: Request,
+    asset: str,
+    horizon: str | None = Query(None),
+    day: str | None = Query(None),
+    family: str | None = Query(None),
+    top_k: int | None = Query(None, ge=1, le=50),
+):
+    try:
+        return build_relevance_explain(request, asset, horizon, day=day, family=family, top_k=top_k)
+    except Exception:
+        return JSONResponse(
+            content={"ok": False, "generated_at": now_iso(), "error": "Failed to read relevance data"},
+            status_code=200, headers={"Cache-Control": "no-store"},
+        )
+
+
+@app.get("/api/v1/relevance/{asset}/preset/{preset_id}")
+def relevance_preset_view(
+    request: Request,
+    asset: str,
+    preset_id: str,
+    horizon: str | None = Query(None),
+    day: str | None = Query(None),
+):
+    try:
+        return build_relevance_preset_view(request, asset, preset_id, horizon=horizon, day=day)
     except Exception:
         return JSONResponse(
             content={"ok": False, "generated_at": now_iso(), "error": "Failed to read relevance data"},
@@ -431,9 +468,14 @@ def relevance_explain(request: Request, asset: str, horizon: str | None = Query(
 
 
 @app.get("/api/v1/relevance/{asset}")
-def relevance_asset(request: Request, asset: str, horizon: str | None = Query(None)):
+def relevance_asset(
+    request: Request,
+    asset: str,
+    horizon: str | None = Query(None),
+    day: str | None = Query(None),
+):
     try:
-        return build_relevance_asset(request, asset, horizon)
+        return build_relevance_asset(request, asset, horizon, day=day)
     except Exception:
         return JSONResponse(
             content={"ok": False, "generated_at": now_iso(), "error": "Failed to read relevance data"},
