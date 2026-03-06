@@ -58,6 +58,7 @@ from .relevance import (
     build_relevance_asset,
     build_relevance_explain,
     build_relevance_presets,
+    build_relevance_presets_explain,
     build_relevance_preset_view,
 )
 
@@ -417,6 +418,17 @@ def relevance_now(request: Request, day: str | None = Query(None)):
     except Exception:
         return JSONResponse(
             content={"ok": False, "generated_at": now_iso(), "error": "Failed to read relevance data"},
+            status_code=200, headers={"Cache-Control": "no-store"},
+        )
+
+
+@app.get("/api/v1/relevance/presets/explain")
+def relevance_presets_explain():
+    try:
+        return build_relevance_presets_explain()
+    except Exception:
+        return JSONResponse(
+            content={"ok": False, "generated_at": now_iso(), "error": "Failed to build presets explain"},
             status_code=200, headers={"Cache-Control": "no-store"},
         )
 
