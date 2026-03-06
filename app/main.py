@@ -420,9 +420,9 @@ def relevance_now(request: Request):
 
 
 @app.get("/api/v1/relevance/explain/{asset}")
-def relevance_explain(request: Request, asset: str, horizon: str | None = Query(None)):
+def relevance_explain(request: Request, asset: str, horizon: str | None = Query(None), day: str | None = Query(None)):
     try:
-        return build_relevance_explain(request, asset, horizon)
+        return build_relevance_explain(request, asset, horizon, day=day)
     except Exception:
         return JSONResponse(
             content={"ok": False, "generated_at": now_iso(), "error": "Failed to read relevance data"},

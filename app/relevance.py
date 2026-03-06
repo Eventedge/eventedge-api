@@ -21,6 +21,7 @@ from fastapi.responses import JSONResponse, Response
 
 ALERTS_DIR = Path(os.getenv("ROUTER_ALERT_DIR", "/home/eventedge/alerts"))
 RELEVANCE_FILE = ALERTS_DIR / "relevance_now.json"
+_DAY_RE = __import__("re").compile(r"^\d{4}-\d{2}-\d{2}$")
 
 VALID_ASSETS = {"BTC", "ETH", "SOL", "HYPE"}
 VALID_HORIZONS = {"4h", "12h", "24h"}
@@ -86,15 +87,26 @@ def _cache_headers(etag: str | None, mtime: datetime | None) -> dict[str, str]:
 # Data loading
 # ---------------------------------------------------------------------------
 
-def _load_relevance() -> tuple[dict | None, str | None]:
-    """Load relevance_now.json. Returns (data, error)."""
-    if not RELEVANCE_FILE.exists():
-        return None, "relevance_now.json not found"
+def _resolve_file(day: str | None = None) -> Path:
+    """Return the relevance file for a given day, or current if None."""
+    if day and _DAY_RE.match(day):
+        dated = ALERTS_DIR / f"relevance_now.{day}.json"
+        if dated.exists():
+            return dated
+    return RELEVANCE_FILE
+
+
+def _load_relevance(day: str | None = None) -> tuple[dict | None, str | None]:
+    """Load relevance_now.json (or dated variant). Returns (data, error)."""
+    path = _resolve_file(day)
+    if not path.exists():
+        name = path.name
+        return None, f"{name} not found"
     try:
-        data = json.loads(RELEVANCE_FILE.read_text())
+        data = json.loads(path.read_text())
         return data, None
     except (json.JSONDecodeError, OSError) as e:
-        return None, f"Failed to read relevance_now.json: {e}"
+        return None, f"Failed to read {path.name}: {e}"
 
 
 def _snapshot_age(data: dict) -> float | None:
@@ -211,17 +223,18 @@ def build_relevance_asset(request: Request, asset: str, horizon: str | None = No
     return JSONResponse(content=result, headers=_cache_headers(etag, mtime))
 
 
-def build_relevance_explain(request: Request, asset: str, horizon: str | None = None) -> JSONResponse:
+def build_relevance_explain(request: Request, asset: str, horizon: str | None = None, day: str | None = None) -> JSONResponse:
     """Explain view: regime, scoring mode, top features with why/perf/open."""
     now = datetime.now(timezone.utc)
-    etag = _file_etag(RELEVANCE_FILE)
-    mtime = _file_mtime_dt(RELEVANCE_FILE)
+    rfile = _resolve_file(day)
+    etag = _file_etag(rfile)
+    mtime = _file_mtime_dt(rfile)
 
     cached = _check_conditional(request, etag, mtime)
     if cached:
         return cached
 
-    data, err = _load_relevance()
+    data, err = _load_relevance(day)
     if err:
         return JSONResponse(
             content={"ok": False, "generated_at": now.isoformat(), "error": err},
@@ -260,9 +273,16 @@ def build_relevance_explain(request: Request, asset: str, horizon: str | None = 
             entry["perf"] = item["perf"]
         if item.get("open"):
             entry["open"] = item["open"]
+        if item.get("_kept_due_to_stability"):
+            entry["_kept_due_to_stability"] = True
+        if item.get("_skipped_due_to_diversity_cap"):
+            entry["_skipped_due_to_diversity_cap"] = True
         features.append(entry)
 
-    result = {
+    stability = meta.get("stability")
+    diversity_caps = meta.get("diversity_caps")
+
+    result: dict[str, Any] = {
         "ok": True,
         "generated_at": now.isoformat(),
         "snapshot_age_s": _snapshot_age(data),
@@ -277,4 +297,9 @@ def build_relevance_explain(request: Request, asset: str, horizon: str | None = 
         "n_scored": meta.get("n_scored", 0),
         "features": features,
     }
+    if stability:
+        result["stability"] = stability
+    if diversity_caps:
+        result["diversity_caps"] = diversity_caps
+        result["skipped_due_to_caps"] = meta.get("skipped_due_to_caps", 0)
     return JSONResponse(content=result, headers=_cache_headers(etag, mtime))
