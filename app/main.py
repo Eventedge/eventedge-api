@@ -53,6 +53,11 @@ from .snapshots import (
     get_snapshot,
 )
 from .hypepipe import router as hypepipe_router
+from .relevance import (
+    build_relevance_now,
+    build_relevance_asset,
+    build_relevance_explain,
+)
 
 
 def now_iso() -> str:
@@ -396,6 +401,44 @@ def admin_alerts_health():
     except Exception:
         return JSONResponse(
             content={"ok": False, "generated_at": now_iso(), "error": "Failed to read alert health"},
+            status_code=200, headers={"Cache-Control": "no-store"},
+        )
+
+
+# ---- AGENT-RELEVANCE-API-001: Relevance endpoints ----
+
+@app.get("/api/v1/relevance/now")
+def relevance_now():
+    try:
+        payload = build_relevance_now()
+        return json_with_cache(payload, "public, s-maxage=30, stale-while-revalidate=300")
+    except Exception:
+        return JSONResponse(
+            content={"ok": False, "generated_at": now_iso(), "error": "Failed to read relevance data"},
+            status_code=200, headers={"Cache-Control": "no-store"},
+        )
+
+
+@app.get("/api/v1/relevance/explain/{asset}")
+def relevance_explain(asset: str, horizon: str | None = Query(None)):
+    try:
+        payload = build_relevance_explain(asset, horizon)
+        return json_with_cache(payload, "public, s-maxage=30, stale-while-revalidate=300")
+    except Exception:
+        return JSONResponse(
+            content={"ok": False, "generated_at": now_iso(), "error": "Failed to read relevance data"},
+            status_code=200, headers={"Cache-Control": "no-store"},
+        )
+
+
+@app.get("/api/v1/relevance/{asset}")
+def relevance_asset(asset: str, horizon: str | None = Query(None)):
+    try:
+        payload = build_relevance_asset(asset, horizon)
+        return json_with_cache(payload, "public, s-maxage=30, stale-while-revalidate=300")
+    except Exception:
+        return JSONResponse(
+            content={"ok": False, "generated_at": now_iso(), "error": "Failed to read relevance data"},
             status_code=200, headers={"Cache-Control": "no-store"},
         )
 
