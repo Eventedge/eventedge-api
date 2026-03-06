@@ -405,13 +405,13 @@ def admin_alerts_health():
         )
 
 
-# ---- AGENT-RELEVANCE-API-001: Relevance endpoints ----
+# ---- AGENT-RELEVANCE-API-001 + AGENT-CACHE-001: Relevance endpoints ----
+# Builders handle cache headers (ETag, Last-Modified, 304) internally.
 
 @app.get("/api/v1/relevance/now")
-def relevance_now():
+def relevance_now(request: Request):
     try:
-        payload = build_relevance_now()
-        return json_with_cache(payload, "public, s-maxage=30, stale-while-revalidate=300")
+        return build_relevance_now(request)
     except Exception:
         return JSONResponse(
             content={"ok": False, "generated_at": now_iso(), "error": "Failed to read relevance data"},
@@ -420,10 +420,9 @@ def relevance_now():
 
 
 @app.get("/api/v1/relevance/explain/{asset}")
-def relevance_explain(asset: str, horizon: str | None = Query(None)):
+def relevance_explain(request: Request, asset: str, horizon: str | None = Query(None)):
     try:
-        payload = build_relevance_explain(asset, horizon)
-        return json_with_cache(payload, "public, s-maxage=30, stale-while-revalidate=300")
+        return build_relevance_explain(request, asset, horizon)
     except Exception:
         return JSONResponse(
             content={"ok": False, "generated_at": now_iso(), "error": "Failed to read relevance data"},
@@ -432,10 +431,9 @@ def relevance_explain(asset: str, horizon: str | None = Query(None)):
 
 
 @app.get("/api/v1/relevance/{asset}")
-def relevance_asset(asset: str, horizon: str | None = Query(None)):
+def relevance_asset(request: Request, asset: str, horizon: str | None = Query(None)):
     try:
-        payload = build_relevance_asset(asset, horizon)
-        return json_with_cache(payload, "public, s-maxage=30, stale-while-revalidate=300")
+        return build_relevance_asset(request, asset, horizon)
     except Exception:
         return JSONResponse(
             content={"ok": False, "generated_at": now_iso(), "error": "Failed to read relevance data"},
