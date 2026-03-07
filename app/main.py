@@ -69,6 +69,14 @@ from .strategies import (
     build_strategy_import,
     build_strategy_export,
 )
+from .strategy_alerts import (
+    build_alert_list,
+    build_alert_get,
+    build_alert_create,
+    build_alert_update,
+    build_alert_delete,
+    build_strategy_diff,
+)
 
 
 def now_iso() -> str:
@@ -527,6 +535,17 @@ async def strategies_create(request: Request):
         )
 
 
+@app.get("/api/v1/strategies/{strategy_id}/diff")
+def strategies_diff(strategy_id: str):
+    try:
+        return build_strategy_diff(strategy_id)
+    except Exception:
+        return JSONResponse(
+            content={"ok": False, "generated_at": now_iso(), "error": "Failed to compute strategy diff"},
+            status_code=200, headers={"Cache-Control": "no-store"},
+        )
+
+
 @app.get("/api/v1/strategies/{strategy_id}/export")
 def strategies_export(strategy_id: str):
     try:
@@ -567,6 +586,63 @@ def strategies_delete(strategy_id: str):
     except Exception:
         return JSONResponse(
             content={"ok": False, "generated_at": now_iso(), "error": "Failed to delete strategy"},
+            status_code=200, headers={"Cache-Control": "no-store"},
+        )
+
+
+# ---- SERVER-STRATEGIES-ALERTS-001: Strategy alert subscriptions ----
+
+@app.get("/api/v1/strategy-alerts")
+def strategy_alerts_list():
+    try:
+        return build_alert_list()
+    except Exception:
+        return JSONResponse(
+            content={"ok": False, "generated_at": now_iso(), "error": "Failed to list strategy alerts"},
+            status_code=200, headers={"Cache-Control": "no-store"},
+        )
+
+
+@app.post("/api/v1/strategy-alerts")
+async def strategy_alerts_create(request: Request):
+    try:
+        return await build_alert_create(request)
+    except Exception:
+        return JSONResponse(
+            content={"ok": False, "generated_at": now_iso(), "error": "Failed to create strategy alert"},
+            status_code=200, headers={"Cache-Control": "no-store"},
+        )
+
+
+@app.get("/api/v1/strategy-alerts/{alert_id}")
+def strategy_alerts_get(alert_id: str):
+    try:
+        return build_alert_get(alert_id)
+    except Exception:
+        return JSONResponse(
+            content={"ok": False, "generated_at": now_iso(), "error": "Failed to get strategy alert"},
+            status_code=200, headers={"Cache-Control": "no-store"},
+        )
+
+
+@app.put("/api/v1/strategy-alerts/{alert_id}")
+async def strategy_alerts_update(request: Request, alert_id: str):
+    try:
+        return await build_alert_update(request, alert_id)
+    except Exception:
+        return JSONResponse(
+            content={"ok": False, "generated_at": now_iso(), "error": "Failed to update strategy alert"},
+            status_code=200, headers={"Cache-Control": "no-store"},
+        )
+
+
+@app.delete("/api/v1/strategy-alerts/{alert_id}")
+def strategy_alerts_delete(alert_id: str):
+    try:
+        return build_alert_delete(alert_id)
+    except Exception:
+        return JSONResponse(
+            content={"ok": False, "generated_at": now_iso(), "error": "Failed to delete strategy alert"},
             status_code=200, headers={"Cache-Control": "no-store"},
         )
 
