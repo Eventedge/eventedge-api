@@ -77,6 +77,12 @@ from .strategy_alerts import (
     build_alert_delete,
     build_strategy_diff,
 )
+from .strategy_templates import (
+    build_templates_list,
+    build_template_get,
+    build_template_instantiate,
+    build_workspace_summary,
+)
 
 
 def now_iso() -> str:
@@ -500,6 +506,41 @@ def relevance_asset(
         )
 
 
+# ---- STRATEGY-TEMPLATES-001: Strategy templates ----
+
+@app.get("/api/v1/strategy-templates")
+def strategy_templates_list():
+    try:
+        return build_templates_list()
+    except Exception:
+        return JSONResponse(
+            content={"ok": False, "generated_at": now_iso(), "error": "Failed to list templates"},
+            status_code=200, headers={"Cache-Control": "no-store"},
+        )
+
+
+@app.get("/api/v1/strategy-templates/{template_id}")
+def strategy_templates_get(template_id: str):
+    try:
+        return build_template_get(template_id)
+    except Exception:
+        return JSONResponse(
+            content={"ok": False, "generated_at": now_iso(), "error": "Failed to get template"},
+            status_code=200, headers={"Cache-Control": "no-store"},
+        )
+
+
+@app.post("/api/v1/strategy-templates/{template_id}/instantiate")
+async def strategy_templates_instantiate(request: Request, template_id: str):
+    try:
+        return await build_template_instantiate(request, template_id)
+    except Exception:
+        return JSONResponse(
+            content={"ok": False, "generated_at": now_iso(), "error": "Failed to instantiate template"},
+            status_code=200, headers={"Cache-Control": "no-store"},
+        )
+
+
 # ---- SERVER-STRATEGIES-001: Strategy CRUD ----
 
 @app.get("/api/v1/strategies")
@@ -553,6 +594,17 @@ def strategies_export(strategy_id: str):
     except Exception:
         return JSONResponse(
             content={"ok": False, "generated_at": now_iso(), "error": "Failed to export strategy"},
+            status_code=200, headers={"Cache-Control": "no-store"},
+        )
+
+
+@app.get("/api/v1/strategies/{strategy_id}/workspace_summary")
+def strategies_workspace_summary(strategy_id: str):
+    try:
+        return build_workspace_summary(strategy_id)
+    except Exception:
+        return JSONResponse(
+            content={"ok": False, "generated_at": now_iso(), "error": "Failed to build workspace summary"},
             status_code=200, headers={"Cache-Control": "no-store"},
         )
 

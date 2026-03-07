@@ -27,7 +27,7 @@ MAX_NAME_LEN = 80
 MAX_PAYLOAD_SIZE = 50_000  # bytes when serialized
 
 VALID_PAYLOAD_KEYS = {"asset_defaults", "preset_id", "family_filter", "pinned", "hidden"}
-VALID_SOURCES = {"web", "bot", "import", "api"}
+VALID_SOURCES = {"web", "bot", "import", "api", "template"}
 
 
 # ---------------------------------------------------------------------------
