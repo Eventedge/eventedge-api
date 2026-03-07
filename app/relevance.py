@@ -44,34 +44,70 @@ PRESETS: list[dict[str, Any]] = [
         "label": "Default",
         "description": "Top mixed signals across all families",
         "families": None,
+        "family_weights": {},
+        "preferred_groups": [],
+        "quality_intent": "balanced",
     },
     {
         "id": "momentum",
         "label": "Momentum",
         "description": "Trend and directional signals from TA and derivatives",
         "families": ["ta", "derivs"],
+        "family_weights": {"ta": 1.3, "derivs": 1.2},
+        "preferred_groups": ["scanner_dir", "confluence"],
+        "quality_intent": "tolerant",
+    },
+    {
+        "id": "mean_reversion",
+        "label": "Mean Reversion",
+        "description": "Contrarian and crowding signals for mean-reversion setups",
+        "families": ["derivs", "ta", "pm"],
+        "family_weights": {"derivs": 1.3, "ta": 1.1, "pm": 1.1},
+        "preferred_groups": ["funding_dir", "liq_bias", "oi_accel"],
+        "quality_intent": "strict",
     },
     {
         "id": "macro",
         "label": "Macro",
         "description": "Macro regime and prediction market signals",
         "families": ["macro", "pm"],
+        "family_weights": {"macro": 1.3, "pm": 1.2},
+        "preferred_groups": [],
+        "quality_intent": "strict",
     },
     {
         "id": "defensive",
         "label": "Defensive",
         "description": "Quality, alerts, and macro-focused risk view",
         "families": ["quality", "alerts", "macro"],
+        "family_weights": {"quality": 1.3, "macro": 1.2, "alerts": 1.1},
+        "preferred_groups": [],
+        "quality_intent": "strict",
     },
     {
         "id": "derivatives",
         "label": "Derivatives",
         "description": "Funding, OI, liquidation, and leverage signals",
         "families": ["deriv", "derivs"],
+        "family_weights": {"deriv": 1.2, "derivs": 1.3},
+        "preferred_groups": ["funding_dir", "oi_accel", "liq_bias"],
+        "quality_intent": "tolerant",
     },
 ]
 
 _PRESET_MAP: dict[str, dict[str, Any]] = {p["id"]: p for p in PRESETS}
+
+# Quality intent modifiers: how strict a preset is about maturity/uncertainty
+_QUALITY_INTENT_MATURITY_PENALTY: dict[str, float] = {
+    "balanced": 0.0,
+    "tolerant": 0.0,    # accepts moderate uncertainty
+    "strict": 0.05,     # penalizes weak maturity
+}
+_QUALITY_INTENT_UNCERTAINTY_PENALTY: dict[str, float] = {
+    "balanced": 0.0,
+    "tolerant": 0.0,
+    "strict": 0.05,     # penalizes wide CI
+}
 
 
 # ---------------------------------------------------------------------------
@@ -392,6 +428,75 @@ def build_relevance_presets() -> JSONResponse:
     )
 
 
+def _apply_preset_scoring(
+    features: list[dict[str, Any]],
+    preset: dict[str, Any],
+) -> list[dict[str, Any]]:
+    """Apply preset-aware re-ranking: family weights, preferred groups, quality intent."""
+    family_weights = preset.get("family_weights", {})
+    preferred_groups = set(preset.get("preferred_groups", []))
+    quality_intent = preset.get("quality_intent", "balanced")
+
+    mat_penalty = _QUALITY_INTENT_MATURITY_PENALTY.get(quality_intent, 0.0)
+    unc_penalty = _QUALITY_INTENT_UNCERTAINTY_PENALTY.get(quality_intent, 0.0)
+
+    for entry in features:
+        base_score = entry.get("score", 0) or 0
+        entry["base_score"] = base_score
+        entry["base_rank"] = entry.get("rank", 0)
+
+        fam = (entry.get("family") or "").lower()
+        fid = entry.get("feature_id", "")
+
+        # Family weight multiplier
+        multiplier = family_weights.get(fam, 1.0)
+
+        # Preferred group bonus
+        group_bonus = 0.0
+        fid_parts = fid.split("@")[0].split(".") if fid else []
+        short_id = ".".join(fid_parts[1:]) if len(fid_parts) > 1 else fid_parts[0] if fid_parts else ""
+        if preferred_groups and short_id in preferred_groups:
+            group_bonus = 0.10
+
+        # Quality intent adjustments
+        quality_adj = 0.0
+        perf = entry.get("perf", {})
+        reasons = []
+
+        if multiplier != 1.0:
+            reasons.append(f"family fit ×{multiplier:.1f}")
+
+        if group_bonus > 0:
+            reasons.append("preferred group +0.10")
+
+        if mat_penalty > 0 and perf:
+            stage = perf.get("maturity_stage", "")
+            if stage in ("seed", "early"):
+                quality_adj -= mat_penalty
+                reasons.append(f"weak maturity -{mat_penalty:.2f}")
+
+        if unc_penalty > 0 and perf:
+            ci = perf.get("ci_width")
+            if ci is not None and ci > 0.03:
+                quality_adj -= unc_penalty
+                reasons.append(f"high uncertainty -{unc_penalty:.2f}")
+
+        preset_score = round(base_score * multiplier + group_bonus + quality_adj, 4)
+        entry["preset_score"] = preset_score
+        entry["preset_multiplier"] = multiplier
+        entry["preset_group_bonus"] = group_bonus
+        entry["preset_reason"] = "; ".join(reasons) if reasons else "base score"
+        if quality_adj != 0:
+            entry["preset_quality_note"] = f"quality intent={quality_intent}, adj={quality_adj:+.2f}"
+
+    # Re-sort by preset_score
+    features.sort(key=lambda x: -(x.get("preset_score", 0)))
+    for i, entry in enumerate(features):
+        entry["rank"] = i + 1
+
+    return features
+
+
 def build_relevance_preset_view(
     request: Request,
     asset: str,
@@ -399,7 +504,7 @@ def build_relevance_preset_view(
     horizon: str | None = None,
     day: str | None = None,
 ) -> JSONResponse:
-    """Apply a preset's family filters server-side and return explain-like response."""
+    """Apply preset-aware scoring and re-ranking server-side."""
     preset = _PRESET_MAP.get(preset_id)
     if not preset:
         return _error_response(
@@ -409,7 +514,6 @@ def build_relevance_preset_view(
 
     families = preset.get("families")
     # For default preset (families=None), return unfiltered
-    # For family-scoped presets, we filter per-family then merge
     if not families:
         return build_relevance_explain(request, asset, horizon=horizon, day=day)
 
@@ -458,6 +562,9 @@ def build_relevance_preset_view(
         if item.get("open"):
             entry["open"] = item["open"]
         features.append(entry)
+
+    # Apply preset-aware re-ranking
+    features = _apply_preset_scoring(features, preset)
 
     result: dict[str, Any] = {
         "ok": True,
