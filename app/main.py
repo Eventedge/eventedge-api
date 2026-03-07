@@ -60,6 +60,15 @@ from .relevance import (
     build_relevance_presets,
     build_relevance_preset_view,
 )
+from .strategies import (
+    build_strategies_list,
+    build_strategy_get,
+    build_strategy_create,
+    build_strategy_update,
+    build_strategy_delete,
+    build_strategy_import,
+    build_strategy_export,
+)
 
 
 def now_iso() -> str:
@@ -99,7 +108,7 @@ app.add_middleware(
         "http://localhost:3000",
     ],
     allow_credentials=False,
-    allow_methods=["GET", "POST", "OPTIONS"],
+    allow_methods=["GET", "POST", "PUT", "DELETE", "OPTIONS"],
     allow_headers=["*"],
 )
 
@@ -479,6 +488,85 @@ def relevance_asset(
     except Exception:
         return JSONResponse(
             content={"ok": False, "generated_at": now_iso(), "error": "Failed to read relevance data"},
+            status_code=200, headers={"Cache-Control": "no-store"},
+        )
+
+
+# ---- SERVER-STRATEGIES-001: Strategy CRUD ----
+
+@app.get("/api/v1/strategies")
+def strategies_list(request: Request):
+    try:
+        return build_strategies_list(request)
+    except Exception:
+        return JSONResponse(
+            content={"ok": False, "generated_at": now_iso(), "error": "Failed to list strategies"},
+            status_code=200, headers={"Cache-Control": "no-store"},
+        )
+
+
+@app.post("/api/v1/strategies/import")
+async def strategies_import(request: Request):
+    try:
+        return await build_strategy_import(request)
+    except Exception:
+        return JSONResponse(
+            content={"ok": False, "generated_at": now_iso(), "error": "Failed to import strategy"},
+            status_code=200, headers={"Cache-Control": "no-store"},
+        )
+
+
+@app.post("/api/v1/strategies")
+async def strategies_create(request: Request):
+    try:
+        return await build_strategy_create(request)
+    except Exception:
+        return JSONResponse(
+            content={"ok": False, "generated_at": now_iso(), "error": "Failed to create strategy"},
+            status_code=200, headers={"Cache-Control": "no-store"},
+        )
+
+
+@app.get("/api/v1/strategies/{strategy_id}/export")
+def strategies_export(strategy_id: str):
+    try:
+        return build_strategy_export(strategy_id)
+    except Exception:
+        return JSONResponse(
+            content={"ok": False, "generated_at": now_iso(), "error": "Failed to export strategy"},
+            status_code=200, headers={"Cache-Control": "no-store"},
+        )
+
+
+@app.get("/api/v1/strategies/{strategy_id}")
+def strategies_get(request: Request, strategy_id: str):
+    try:
+        return build_strategy_get(request, strategy_id)
+    except Exception:
+        return JSONResponse(
+            content={"ok": False, "generated_at": now_iso(), "error": "Failed to get strategy"},
+            status_code=200, headers={"Cache-Control": "no-store"},
+        )
+
+
+@app.put("/api/v1/strategies/{strategy_id}")
+async def strategies_update(request: Request, strategy_id: str):
+    try:
+        return await build_strategy_update(request, strategy_id)
+    except Exception:
+        return JSONResponse(
+            content={"ok": False, "generated_at": now_iso(), "error": "Failed to update strategy"},
+            status_code=200, headers={"Cache-Control": "no-store"},
+        )
+
+
+@app.delete("/api/v1/strategies/{strategy_id}")
+def strategies_delete(strategy_id: str):
+    try:
+        return build_strategy_delete(strategy_id)
+    except Exception:
+        return JSONResponse(
+            content={"ok": False, "generated_at": now_iso(), "error": "Failed to delete strategy"},
             status_code=200, headers={"Cache-Control": "no-store"},
         )
 
