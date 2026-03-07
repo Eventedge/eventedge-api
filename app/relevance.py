@@ -413,6 +413,57 @@ def build_relevance_explain(
     if diversity_caps:
         result["diversity_caps"] = diversity_caps
         result["skipped_due_to_caps"] = meta.get("skipped_due_to_caps", 0)
+    top_families = meta.get("top_families")
+    if top_families:
+        result["top_families"] = top_families
+    return JSONResponse(content=result, headers=_cache_headers(etag, mtime))
+
+
+def build_relevance_families(
+    request: Request,
+    asset: str,
+    horizon: str | None = None,
+    day: str | None = None,
+) -> JSONResponse:
+    """Family-level relevance view for lightweight consumers."""
+    now = datetime.now(timezone.utc)
+    rfile = _resolve_file(day)
+    etag = _file_etag(rfile)
+    mtime = _file_mtime_dt(rfile)
+
+    cached = _check_conditional(request, etag, mtime)
+    if cached:
+        return cached
+
+    data, err = _load_relevance(day)
+    if err:
+        return _error_response(now, err)
+
+    asset_upper = asset.upper()
+    asset_data = data.get("assets", {}).get(asset_upper)
+    if not asset_data:
+        return _error_response(now, f"No data for asset {asset_upper}")
+
+    h = (horizon or "24h").lower()
+    h_data = asset_data.get("horizons", {}).get(h, {})
+    meta = h_data.get("meta", {})
+    top_families = meta.get("top_families", [])
+
+    result: dict[str, Any] = {
+        "ok": True,
+        "generated_at": now.isoformat(),
+        "snapshot_age_s": _snapshot_age(data),
+        **_file_meta(rfile),
+        "asset": asset_upper,
+        "horizon": h,
+        "day": data.get("day"),
+        "regime_bucket": asset_data.get("regime_bucket"),
+        "regime_label": asset_data.get("regime_label"),
+        "scoring_mode": meta.get("scoring_mode", data.get("scoring_mode")),
+        "n_families": len(top_families),
+        "families": top_families,
+        "family_distribution": _family_distribution(h_data.get("top", [])),
+    }
     return JSONResponse(content=result, headers=_cache_headers(etag, mtime))
 
 

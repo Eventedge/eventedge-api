@@ -57,6 +57,7 @@ from .relevance import (
     build_relevance_now,
     build_relevance_asset,
     build_relevance_explain,
+    build_relevance_families,
     build_relevance_presets,
     build_relevance_preset_view,
 )
@@ -453,6 +454,22 @@ def relevance_presets():
     except Exception:
         return JSONResponse(
             content={"ok": False, "generated_at": now_iso(), "error": "Failed to build presets"},
+            status_code=200, headers={"Cache-Control": "no-store"},
+        )
+
+
+@app.get("/api/v1/relevance/families/{asset}")
+def relevance_families(
+    request: Request,
+    asset: str,
+    horizon: str | None = Query(None),
+    day: str | None = Query(None),
+):
+    try:
+        return build_relevance_families(request, asset, horizon=horizon, day=day)
+    except Exception:
+        return JSONResponse(
+            content={"ok": False, "generated_at": now_iso(), "error": "Failed to read family data"},
             status_code=200, headers={"Cache-Control": "no-store"},
         )
 
