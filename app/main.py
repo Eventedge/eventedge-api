@@ -76,6 +76,8 @@ from .strategy_alerts import (
     build_alert_update,
     build_alert_delete,
     build_strategy_diff,
+    build_alert_preview,
+    build_alert_history,
 )
 from .strategy_templates import (
     build_templates_list,
@@ -662,6 +664,28 @@ async def strategy_alerts_create(request: Request):
     except Exception:
         return JSONResponse(
             content={"ok": False, "generated_at": now_iso(), "error": "Failed to create strategy alert"},
+            status_code=200, headers={"Cache-Control": "no-store"},
+        )
+
+
+@app.get("/api/v1/strategy-alerts/{alert_id}/preview")
+def strategy_alerts_preview(alert_id: str):
+    try:
+        return build_alert_preview(alert_id)
+    except Exception:
+        return JSONResponse(
+            content={"ok": False, "generated_at": now_iso(), "error": "Failed to build alert preview"},
+            status_code=200, headers={"Cache-Control": "no-store"},
+        )
+
+
+@app.get("/api/v1/strategy-alerts/{alert_id}/history")
+def strategy_alerts_history(alert_id: str, limit: int = Query(20, ge=1, le=100)):
+    try:
+        return build_alert_history(alert_id, limit=limit)
+    except Exception:
+        return JSONResponse(
+            content={"ok": False, "generated_at": now_iso(), "error": "Failed to read alert history"},
             status_code=200, headers={"Cache-Control": "no-store"},
         )
 

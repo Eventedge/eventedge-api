@@ -438,3 +438,216 @@ def build_strategy_diff(strategy_id: str) -> JSONResponse:
         },
     }
     return JSONResponse(content=result, headers={"Cache-Control": "no-store"})
+
+
+# ---------------------------------------------------------------------------
+# Alert preview — what WOULD trigger right now
+# ---------------------------------------------------------------------------
+
+LEDGER_FILE = ALERTS_DIR / "strategy_alerts_ledger.jsonl"
+
+_RULE_LABELS = {
+    "feature_enter": "Feature entered Top-K",
+    "feature_exit": "Feature exited Top-K",
+    "rank_delta_min": "Large rank move",
+    "score_delta_min": "Large score change",
+    "regime_change": "Regime changed",
+    "scoring_mode_flip": "Scoring mode flipped",
+    "drift_warning": "Drift warning",
+    "daily_digest": "Daily digest",
+}
+
+
+def _evaluate_rules_preview(diff: dict, rules: dict) -> list[dict]:
+    """Evaluate rules against a diff. Returns list of {rule, label, detail, triggered}."""
+    results = []
+    summary = diff.get("summary", {})
+
+    def _add(rule_key: str, triggered: bool, detail: str = ""):
+        results.append({
+            "rule": rule_key,
+            "label": _RULE_LABELS.get(rule_key, rule_key),
+            "enabled": bool(rules.get(rule_key, False)),
+            "triggered": triggered,
+            "detail": detail,
+        })
+
+    # Regime change
+    regime = diff.get("regime", {})
+    regime_triggered = bool(summary.get("regime_changed"))
+    regime_detail = f"{regime.get('yesterday')} → {regime.get('today')}" if regime_triggered else ""
+    _add("regime_change", regime_triggered, regime_detail)
+
+    # Scoring mode flip
+    sm = diff.get("scoring_mode", {})
+    sm_triggered = bool(summary.get("scoring_mode_changed"))
+    sm_detail = f"{sm.get('yesterday')} → {sm.get('today')}" if sm_triggered else ""
+    _add("scoring_mode_flip", sm_triggered, sm_detail)
+
+    # Feature enter
+    n_added = summary.get("n_added", 0)
+    added_names = ", ".join(f.get("feature_id", "?").split("@")[0] for f in diff.get("added", [])[:5])
+    _add("feature_enter", n_added > 0, f"{n_added} added: {added_names}" if n_added else "")
+
+    # Feature exit
+    n_dropped = summary.get("n_dropped", 0)
+    dropped_names = ", ".join(f.get("feature_id", "?").split("@")[0] for f in diff.get("dropped", [])[:5])
+    _add("feature_exit", n_dropped > 0, f"{n_dropped} dropped: {dropped_names}" if n_dropped else "")
+
+    # Rank movers
+    rank_min = rules.get("rank_delta_min", 3)
+    big_movers = [m for m in diff.get("rank_movers", []) if abs(m.get("rank_delta", 0)) >= rank_min]
+    _add("rank_delta_min", len(big_movers) > 0,
+         f"{len(big_movers)} movers (threshold ≥{rank_min})" if big_movers else f"threshold ≥{rank_min}")
+
+    # Score movers
+    score_min = rules.get("score_delta_min", 0.10)
+    big_scores = [m for m in diff.get("score_movers", []) if abs(m.get("score_delta", 0)) >= score_min]
+    _add("score_delta_min", len(big_scores) > 0,
+         f"{len(big_scores)} changes (threshold ≥{score_min})" if big_scores else f"threshold ≥{score_min}")
+
+    return results
+
+
+def _check_cooldown(alert: dict) -> dict:
+    """Check cooldown status. Returns {elapsed, suppressed, last_sent_at, cooldown_min}."""
+    last = alert.get("last_sent_at")
+    cooldown_min = alert.get("cooldown_min", 180)
+    if not last:
+        return {"elapsed_min": None, "suppressed": False, "last_sent_at": None, "cooldown_min": cooldown_min}
+    try:
+        last_dt = datetime.fromisoformat(last)
+        elapsed = (datetime.now(timezone.utc) - last_dt).total_seconds() / 60
+        return {
+            "elapsed_min": round(elapsed, 1),
+            "suppressed": elapsed < cooldown_min,
+            "last_sent_at": last,
+            "cooldown_min": cooldown_min,
+        }
+    except Exception:
+        return {"elapsed_min": None, "suppressed": False, "last_sent_at": last, "cooldown_min": cooldown_min}
+
+
+def build_alert_preview(alert_id: str) -> JSONResponse:
+    """GET /api/v1/strategy-alerts/{id}/preview — what would trigger right now."""
+    now = _now_iso()
+
+    store = _load_alert_store()
+    alert = None
+    for item in store["items"]:
+        if item["id"] == alert_id:
+            alert = item
+            break
+    if not alert:
+        return JSONResponse(
+            content={"ok": False, "generated_at": now, "error": f"Alert {alert_id} not found"},
+            status_code=404, headers={"Cache-Control": "no-store"},
+        )
+
+    strategy_id = alert["strategy_id"]
+    strategy = _get_strategy(strategy_id)
+    if not strategy:
+        return JSONResponse(
+            content={"ok": False, "generated_at": now, "error": f"Strategy {strategy_id} not found"},
+            status_code=404, headers={"Cache-Control": "no-store"},
+        )
+
+    # Get diff (reuse existing logic)
+    diff_resp = build_strategy_diff(strategy_id)
+    try:
+        diff_data = json.loads(diff_resp.body.decode("utf-8"))
+    except Exception:
+        diff_data = {}
+
+    if not diff_data.get("ok"):
+        return JSONResponse(
+            content={"ok": False, "generated_at": now, "error": "Could not compute diff", "detail": diff_data.get("error", "")},
+            status_code=200, headers={"Cache-Control": "no-store"},
+        )
+
+    rules = alert.get("rules", {})
+    rule_results = _evaluate_rules_preview(diff_data, rules)
+    cooldown = _check_cooldown(alert)
+    triggered = [r for r in rule_results if r["triggered"] and r["enabled"]]
+    would_send = len(triggered) > 0 and not cooldown["suppressed"]
+
+    return JSONResponse(content={
+        "ok": True,
+        "generated_at": now,
+        "alert_id": alert_id,
+        "strategy_id": strategy_id,
+        "strategy_name": strategy.get("name", ""),
+        "is_enabled": alert.get("is_enabled", False),
+        "cooldown": cooldown,
+        "would_send": would_send,
+        "n_triggered": len(triggered),
+        "rules": rule_results,
+        "diff_summary": diff_data.get("summary", {}),
+    }, headers={"Cache-Control": "no-store"})
+
+
+# ---------------------------------------------------------------------------
+# Alert history — recent sent alerts from ledger
+# ---------------------------------------------------------------------------
+
+def _tail_file(path: Path, n: int = 200) -> list[str]:
+    """Read last N lines from a file."""
+    try:
+        with open(path, "rb") as f:
+            f.seek(0, 2)
+            size = f.tell()
+            chunk = min(size, n * 500)
+            f.seek(max(0, size - chunk))
+            data = f.read().decode("utf-8", errors="replace")
+            return data.strip().split("\n")[-n:]
+    except (FileNotFoundError, OSError):
+        return []
+
+
+def build_alert_history(alert_id: str, limit: int = 20) -> JSONResponse:
+    """GET /api/v1/strategy-alerts/{id}/history — recent sent alerts from ledger."""
+    now = _now_iso()
+
+    store = _load_alert_store()
+    alert = None
+    for item in store["items"]:
+        if item["id"] == alert_id:
+            alert = item
+            break
+    if not alert:
+        return JSONResponse(
+            content={"ok": False, "generated_at": now, "error": f"Alert {alert_id} not found"},
+            status_code=404, headers={"Cache-Control": "no-store"},
+        )
+
+    lines = _tail_file(LEDGER_FILE, 500)
+    entries = []
+    for line in reversed(lines):
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            obj = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if obj.get("alert_id") == alert_id:
+            entries.append({
+                "ts": obj.get("ts"),
+                "strategy_name": obj.get("strategy_name", ""),
+                "triggers": obj.get("triggers", []),
+                "matched_rules": obj.get("matched_rules", []),
+                "added_count": obj.get("added_count"),
+                "dropped_count": obj.get("dropped_count"),
+                "regime_changed": obj.get("regime_changed"),
+            })
+            if len(entries) >= limit:
+                break
+
+    return JSONResponse(content={
+        "ok": True,
+        "generated_at": now,
+        "alert_id": alert_id,
+        "strategy_id": alert["strategy_id"],
+        "count": len(entries),
+        "items": entries,
+    }, headers={"Cache-Control": "no-store"})
