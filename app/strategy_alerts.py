@@ -330,6 +330,177 @@ def _extract_top_ids(data: dict, asset: str, horizon: str) -> list[dict]:
     return h_data.get("top", [])
 
 
+def _family_of(feature_id: str) -> str:
+    """Extract family from feature_id like 'ta.scanner_dir@1.0' -> 'ta'."""
+    return feature_id.split(".")[0] if "." in feature_id else feature_id.split("@")[0]
+
+
+def _build_family_changes(
+    added: list[dict], dropped: list[dict],
+    rank_movers: list[dict], score_movers: list[dict],
+) -> list[dict]:
+    """Group feature changes by family. Returns list of {family, added, dropped, movers, net_direction}."""
+    from collections import defaultdict
+    fam_added: dict[str, list] = defaultdict(list)
+    fam_dropped: dict[str, list] = defaultdict(list)
+    fam_movers: dict[str, list] = defaultdict(list)
+
+    for f in added:
+        fam_added[_family_of(f["feature_id"])].append(f["feature_id"])
+    for f in dropped:
+        fam_dropped[_family_of(f["feature_id"])].append(f["feature_id"])
+    for f in rank_movers + score_movers:
+        fam = _family_of(f["feature_id"])
+        if f["feature_id"] not in fam_movers[fam]:
+            fam_movers[fam].append(f["feature_id"])
+
+    all_families = sorted(set(list(fam_added) + list(fam_dropped) + list(fam_movers)))
+    results = []
+    for fam in all_families:
+        a = fam_added.get(fam, [])
+        d = fam_dropped.get(fam, [])
+        m = fam_movers.get(fam, [])
+        net = len(a) - len(d)
+        direction = "gaining" if net > 0 else "losing" if net < 0 else "stable"
+        results.append({
+            "family": fam,
+            "added": a,
+            "dropped": d,
+            "movers": m,
+            "n_added": len(a),
+            "n_dropped": len(d),
+            "n_movers": len(m),
+            "net_direction": direction,
+        })
+    return results
+
+
+def _build_family_rank_changes(
+    today_families: list[dict], yesterday_families: list[dict],
+) -> list[dict]:
+    """Compare top_families between today and yesterday."""
+    today_map = {f.get("family", ""): i for i, f in enumerate(today_families)}
+    yesterday_map = {f.get("family", ""): i for i, f in enumerate(yesterday_families)}
+    all_fams = sorted(set(list(today_map) + list(yesterday_map)))
+    changes = []
+    for fam in all_fams:
+        if not fam:
+            continue
+        t_rank = today_map.get(fam)
+        y_rank = yesterday_map.get(fam)
+        t_entry = today_families[t_rank] if t_rank is not None else {}
+        if t_rank is not None and y_rank is not None:
+            delta = y_rank - t_rank  # positive = improved
+            if delta != 0:
+                changes.append({
+                    "family": fam,
+                    "rank_today": t_rank + 1,
+                    "rank_yesterday": y_rank + 1,
+                    "rank_delta": delta,
+                    "boost_direction": t_entry.get("boost_direction", "neutral"),
+                })
+        elif t_rank is not None and y_rank is None:
+            changes.append({
+                "family": fam,
+                "rank_today": t_rank + 1,
+                "rank_yesterday": None,
+                "rank_delta": None,
+                "status": "new",
+                "boost_direction": t_entry.get("boost_direction", "neutral"),
+            })
+        elif y_rank is not None and t_rank is None:
+            changes.append({
+                "family": fam,
+                "rank_today": None,
+                "rank_yesterday": y_rank + 1,
+                "rank_delta": None,
+                "status": "removed",
+            })
+    changes.sort(key=lambda x: abs(x.get("rank_delta") or 0), reverse=True)
+    return changes
+
+
+def _build_top_reasons(
+    added: list, dropped: list, rank_movers: list, score_movers: list,
+    regime_changed: bool, today_regime: str, yesterday_regime: str,
+    scoring_changed: bool, today_scoring: str, yesterday_scoring: str,
+    family_rank_changes: list,
+) -> list[str]:
+    """Generate human-readable top reasons for the diff."""
+    reasons: list[str] = []
+    if regime_changed:
+        reasons.append(f"Regime shifted: {yesterday_regime} → {today_regime}")
+    if scoring_changed:
+        reasons.append(f"Scoring mode: {yesterday_scoring} → {today_scoring}")
+    if added:
+        families = sorted(set(_family_of(f["feature_id"]) for f in added))
+        reasons.append(f"{len(added)} features entered ({', '.join(families)})")
+    if dropped:
+        families = sorted(set(_family_of(f["feature_id"]) for f in dropped))
+        reasons.append(f"{len(dropped)} features exited ({', '.join(families)})")
+    for fc in family_rank_changes[:3]:
+        fam = fc["family"]
+        if fc.get("status") == "new":
+            reasons.append(f"{fam} family newly ranked (#{fc['rank_today']})")
+        elif fc.get("rank_delta") and abs(fc["rank_delta"]) >= 2:
+            direction = "rose" if fc["rank_delta"] > 0 else "fell"
+            reasons.append(f"{fam} family {direction} {abs(fc['rank_delta'])} ranks")
+    if rank_movers:
+        top = rank_movers[0]
+        direction = "up" if top["rank_delta"] > 0 else "down"
+        reasons.append(f"Biggest mover: {top['feature_id'].split('@')[0]} ({direction} {abs(top['rank_delta'])})")
+    return reasons[:6]
+
+
+def _build_alert_digest(
+    asset: str, horizon: str,
+    added: list, dropped: list, rank_movers: list, score_movers: list,
+    regime_changed: bool, today_regime: str, yesterday_regime: str,
+    scoring_changed: bool, today_scoring: str, yesterday_scoring: str,
+    family_changes: list, family_rank_changes: list,
+) -> dict:
+    """Build compact alert digest with headline + bullets for bot/notification use."""
+    parts = []
+    if regime_changed:
+        parts.append(f"regime {yesterday_regime}→{today_regime}")
+    if scoring_changed:
+        parts.append(f"scoring {yesterday_scoring}→{today_scoring}")
+    if added:
+        parts.append(f"+{len(added)} features")
+    if dropped:
+        parts.append(f"-{len(dropped)} features")
+    if rank_movers:
+        parts.append(f"{len(rank_movers)} rank moves")
+
+    headline = f"{asset}/{horizon}: " + (", ".join(parts) if parts else "no changes")
+
+    bullets: list[str] = []
+    if regime_changed:
+        bullets.append(f"Regime: {yesterday_regime} → {today_regime}")
+    if scoring_changed:
+        bullets.append(f"Scoring: {yesterday_scoring} → {today_scoring}")
+
+    # Family-level bullets
+    gaining = [fc for fc in family_changes if fc["net_direction"] == "gaining"]
+    losing = [fc for fc in family_changes if fc["net_direction"] == "losing"]
+    if gaining:
+        names = ", ".join(fc["family"] for fc in gaining[:3])
+        bullets.append(f"Gaining families: {names}")
+    if losing:
+        names = ", ".join(fc["family"] for fc in losing[:3])
+        bullets.append(f"Losing families: {names}")
+
+    # Top added/dropped
+    if added:
+        top3 = [f["feature_id"].split("@")[0] for f in added[:3]]
+        bullets.append(f"Entered: {', '.join(top3)}")
+    if dropped:
+        top3 = [f["feature_id"].split("@")[0] for f in dropped[:3]]
+        bullets.append(f"Exited: {', '.join(top3)}")
+
+    return {"headline": headline, "bullets": bullets[:8]}
+
+
 def build_strategy_diff(strategy_id: str) -> JSONResponse:
     """GET /api/v1/strategies/{id}/diff — compare today vs yesterday for strategy context."""
     now = _now_iso()
@@ -404,6 +575,29 @@ def build_strategy_diff(strategy_id: str) -> JSONResponse:
     regime_changed = yesterday_data is not None and today_regime != yesterday_regime
     scoring_mode_changed = yesterday_data is not None and today_scoring != yesterday_scoring
 
+    # --- Family-aware grouping ---
+    family_changes = _build_family_changes(added, dropped, rank_movers, score_movers)
+
+    # Top families from relevance horizons
+    today_h = today_data.get("assets", {}).get(asset.upper(), {}).get("horizons", {}).get(horizon.lower(), {})
+    yesterday_h = (yesterday_data or {}).get("assets", {}).get(asset.upper(), {}).get("horizons", {}).get(horizon.lower(), {})
+    today_families = today_h.get("meta", {}).get("top_families", [])
+    yesterday_families = yesterday_h.get("meta", {}).get("top_families", [])
+    family_rank_changes = _build_family_rank_changes(today_families, yesterday_families)
+
+    top_reasons = _build_top_reasons(
+        added, dropped, rank_movers, score_movers,
+        regime_changed, today_regime, yesterday_regime,
+        scoring_mode_changed, today_scoring, yesterday_scoring,
+        family_rank_changes,
+    )
+    alert_digest = _build_alert_digest(
+        asset, horizon, added, dropped, rank_movers, score_movers,
+        regime_changed, today_regime, yesterday_regime,
+        scoring_mode_changed, today_scoring, yesterday_scoring,
+        family_changes, family_rank_changes,
+    )
+
     result = {
         "ok": True,
         "generated_at": now,
@@ -428,6 +622,10 @@ def build_strategy_diff(strategy_id: str) -> JSONResponse:
         "dropped": dropped,
         "rank_movers": rank_movers[:10],
         "score_movers": score_movers[:10],
+        "family_changes": family_changes,
+        "family_rank_changes": family_rank_changes,
+        "top_reasons": top_reasons,
+        "alert_digest": alert_digest,
         "summary": {
             "n_added": len(added),
             "n_dropped": len(dropped),
@@ -435,6 +633,7 @@ def build_strategy_diff(strategy_id: str) -> JSONResponse:
             "n_score_movers": len(score_movers),
             "regime_changed": regime_changed,
             "scoring_mode_changed": scoring_mode_changed,
+            "n_family_changes": len(family_changes),
         },
     }
     return JSONResponse(content=result, headers={"Cache-Control": "no-store"})
@@ -583,6 +782,9 @@ def build_alert_preview(alert_id: str) -> JSONResponse:
         "n_triggered": len(triggered),
         "rules": rule_results,
         "diff_summary": diff_data.get("summary", {}),
+        "family_changes": diff_data.get("family_changes", []),
+        "top_reasons": diff_data.get("top_reasons", []),
+        "alert_digest": diff_data.get("alert_digest", {}),
     }, headers={"Cache-Control": "no-store"})
 
 
