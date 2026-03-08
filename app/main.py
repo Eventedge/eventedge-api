@@ -73,6 +73,9 @@ from .strategies import (
     build_strategy_delete,
     build_strategy_import,
     build_strategy_export,
+    build_strategy_archive,
+    build_strategy_unarchive,
+    build_strategy_revisions,
 )
 from .strategy_alerts import (
     build_alert_list,
@@ -83,12 +86,15 @@ from .strategy_alerts import (
     build_strategy_diff,
     build_alert_preview,
     build_alert_history,
+    build_alert_snooze,
+    build_alert_unsnooze,
 )
 from .strategy_templates import (
     build_templates_list,
     build_template_get,
     build_template_instantiate,
     build_workspace_summary,
+    build_template_recommendations,
 )
 
 
@@ -608,6 +614,20 @@ def strategy_templates_list():
         )
 
 
+@app.get("/api/v1/strategy-templates/recommendations")
+def strategy_templates_recommendations(
+    asset: str = Query("BTC"),
+    horizon: str = Query("24h"),
+):
+    try:
+        return build_template_recommendations(asset=asset, horizon=horizon)
+    except Exception:
+        return JSONResponse(
+            content={"ok": False, "generated_at": now_iso(), "error": "Failed to build recommendations"},
+            status_code=200, headers={"Cache-Control": "no-store"},
+        )
+
+
 @app.get("/api/v1/strategy-templates/{template_id}")
 def strategy_templates_get(template_id: str):
     try:
@@ -661,6 +681,39 @@ async def strategies_create(request: Request):
     except Exception:
         return JSONResponse(
             content={"ok": False, "generated_at": now_iso(), "error": "Failed to create strategy"},
+            status_code=200, headers={"Cache-Control": "no-store"},
+        )
+
+
+@app.post("/api/v1/strategies/{strategy_id}/archive")
+def strategies_archive(strategy_id: str):
+    try:
+        return build_strategy_archive(strategy_id)
+    except Exception:
+        return JSONResponse(
+            content={"ok": False, "generated_at": now_iso(), "error": "Failed to archive strategy"},
+            status_code=200, headers={"Cache-Control": "no-store"},
+        )
+
+
+@app.post("/api/v1/strategies/{strategy_id}/unarchive")
+def strategies_unarchive(strategy_id: str):
+    try:
+        return build_strategy_unarchive(strategy_id)
+    except Exception:
+        return JSONResponse(
+            content={"ok": False, "generated_at": now_iso(), "error": "Failed to unarchive strategy"},
+            status_code=200, headers={"Cache-Control": "no-store"},
+        )
+
+
+@app.get("/api/v1/strategies/{strategy_id}/revisions")
+def strategies_revisions(strategy_id: str):
+    try:
+        return build_strategy_revisions(strategy_id)
+    except Exception:
+        return JSONResponse(
+            content={"ok": False, "generated_at": now_iso(), "error": "Failed to get revisions"},
             status_code=200, headers={"Cache-Control": "no-store"},
         )
 
@@ -773,6 +826,28 @@ def strategy_alerts_history(alert_id: str, limit: int = Query(20, ge=1, le=100))
     except Exception:
         return JSONResponse(
             content={"ok": False, "generated_at": now_iso(), "error": "Failed to read alert history"},
+            status_code=200, headers={"Cache-Control": "no-store"},
+        )
+
+
+@app.post("/api/v1/strategy-alerts/{alert_id}/snooze")
+async def strategy_alerts_snooze(request: Request, alert_id: str):
+    try:
+        return await build_alert_snooze(request, alert_id)
+    except Exception:
+        return JSONResponse(
+            content={"ok": False, "generated_at": now_iso(), "error": "Failed to snooze alert"},
+            status_code=200, headers={"Cache-Control": "no-store"},
+        )
+
+
+@app.post("/api/v1/strategy-alerts/{alert_id}/unsnooze")
+def strategy_alerts_unsnooze(alert_id: str):
+    try:
+        return build_alert_unsnooze(alert_id)
+    except Exception:
+        return JSONResponse(
+            content={"ok": False, "generated_at": now_iso(), "error": "Failed to unsnooze alert"},
             status_code=200, headers={"Cache-Control": "no-store"},
         )
 

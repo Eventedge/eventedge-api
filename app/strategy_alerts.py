@@ -1,7 +1,9 @@
-"""SERVER-STRATEGIES-ALERTS-001: Strategy alert subscriptions + strategy diff.
+"""SERVER-STRATEGIES-ALERTS-001/002: Strategy alert subscriptions + strategy diff.
 
 File-backed alert subscriptions at /home/eventedge/alerts/strategy_alerts.json.
 Atomic writes via tempfile + rename. No DB required.
+
+v002: digest_mode, severity, snoozed_until fields; snooze/unsnooze endpoints.
 """
 from __future__ import annotations
 
@@ -24,6 +26,7 @@ RELEVANCE_FILE = ALERTS_DIR / "relevance_now.json"
 
 MAX_SUBSCRIPTIONS = 500
 VALID_CHANNELS = {"telegram"}
+VALID_SEVERITIES = {"low", "medium", "high"}
 
 DEFAULT_RULES = {
     "feature_enter": True,
@@ -89,6 +92,14 @@ def _get_strategy(strategy_id: str) -> dict | None:
     return None
 
 
+def _ensure_alert_metadata(item: dict) -> dict:
+    """Backfill v002 alert fields on legacy items (in-place)."""
+    item.setdefault("digest_mode", False)
+    item.setdefault("severity", "medium")
+    item.setdefault("snoozed_until", None)
+    return item
+
+
 def _validate_rules(rules: Any) -> tuple[dict, str | None]:
     """Validate and merge with defaults. Returns (merged_rules, error)."""
     if rules is None:
@@ -108,12 +119,13 @@ def _validate_rules(rules: Any) -> tuple[dict, str | None]:
 
 def build_alert_list() -> JSONResponse:
     store = _load_alert_store()
+    items = [_ensure_alert_metadata(i) for i in store["items"]]
     return JSONResponse(
         content={
             "ok": True,
             "generated_at": _now_iso(),
-            "count": len(store["items"]),
-            "items": store["items"],
+            "count": len(items),
+            "items": items,
         },
         headers={"Cache-Control": "no-store"},
     )
@@ -123,6 +135,7 @@ def build_alert_get(alert_id: str) -> JSONResponse:
     store = _load_alert_store()
     for item in store["items"]:
         if item["id"] == alert_id:
+            _ensure_alert_metadata(item)
             return JSONResponse(
                 content={"ok": True, "generated_at": _now_iso(), "item": item},
                 headers={"Cache-Control": "no-store"},
@@ -194,6 +207,10 @@ async def build_alert_create(request: Request) -> JSONResponse:
             headers={"Cache-Control": "no-store"},
         )
 
+    severity = body.get("severity", "medium")
+    if severity not in VALID_SEVERITIES:
+        severity = "medium"
+
     now = _now_iso()
     item = {
         "id": str(uuid.uuid4()),
@@ -206,6 +223,9 @@ async def build_alert_create(request: Request) -> JSONResponse:
         "last_sent_at": None,
         "created_at": now,
         "updated_at": now,
+        "digest_mode": bool(body.get("digest_mode", False)),
+        "severity": severity,
+        "snoozed_until": None,
     }
     store["items"].append(item)
     _save_alert_store(store)
@@ -261,6 +281,13 @@ async def build_alert_update(request: Request, alert_id: str) -> JSONResponse:
 
     if "target" in body and isinstance(body["target"], str) and body["target"]:
         target_item["target"] = body["target"]
+
+    # v002 fields
+    _ensure_alert_metadata(target_item)
+    if "digest_mode" in body and isinstance(body["digest_mode"], bool):
+        target_item["digest_mode"] = body["digest_mode"]
+    if "severity" in body and body["severity"] in VALID_SEVERITIES:
+        target_item["severity"] = body["severity"]
 
     target_item["updated_at"] = _now_iso()
     _save_alert_store(store)
@@ -709,22 +736,41 @@ def _evaluate_rules_preview(diff: dict, rules: dict) -> list[dict]:
 
 
 def _check_cooldown(alert: dict) -> dict:
-    """Check cooldown status. Returns {elapsed, suppressed, last_sent_at, cooldown_min}."""
+    """Check cooldown status. Returns {elapsed, suppressed, snoozed, last_sent_at, cooldown_min}."""
     last = alert.get("last_sent_at")
     cooldown_min = alert.get("cooldown_min", 180)
+
+    # Check snooze
+    snoozed_until = alert.get("snoozed_until")
+    snoozed = False
+    if snoozed_until:
+        try:
+            snooze_dt = datetime.fromisoformat(snoozed_until)
+            snoozed = datetime.now(timezone.utc) < snooze_dt
+        except Exception:
+            pass
+
     if not last:
-        return {"elapsed_min": None, "suppressed": False, "last_sent_at": None, "cooldown_min": cooldown_min}
+        return {
+            "elapsed_min": None, "suppressed": snoozed, "snoozed": snoozed,
+            "snoozed_until": snoozed_until, "last_sent_at": None, "cooldown_min": cooldown_min,
+        }
     try:
         last_dt = datetime.fromisoformat(last)
         elapsed = (datetime.now(timezone.utc) - last_dt).total_seconds() / 60
         return {
             "elapsed_min": round(elapsed, 1),
-            "suppressed": elapsed < cooldown_min,
+            "suppressed": (elapsed < cooldown_min) or snoozed,
+            "snoozed": snoozed,
+            "snoozed_until": snoozed_until,
             "last_sent_at": last,
             "cooldown_min": cooldown_min,
         }
     except Exception:
-        return {"elapsed_min": None, "suppressed": False, "last_sent_at": last, "cooldown_min": cooldown_min}
+        return {
+            "elapsed_min": None, "suppressed": snoozed, "snoozed": snoozed,
+            "snoozed_until": snoozed_until, "last_sent_at": last, "cooldown_min": cooldown_min,
+        }
 
 
 def build_alert_preview(alert_id: str) -> JSONResponse:
@@ -853,3 +899,67 @@ def build_alert_history(alert_id: str, limit: int = 20) -> JSONResponse:
         "count": len(entries),
         "items": entries,
     }, headers={"Cache-Control": "no-store"})
+
+
+# ---------------------------------------------------------------------------
+# Snooze / Unsnooze
+# ---------------------------------------------------------------------------
+
+async def build_alert_snooze(request: Request, alert_id: str) -> JSONResponse:
+    """POST /api/v1/strategy-alerts/{id}/snooze — snooze alert for N minutes."""
+    now = _now_iso()
+
+    try:
+        body = await request.json()
+    except Exception:
+        body = {}
+
+    minutes = body.get("minutes", 60)
+    if not isinstance(minutes, (int, float)) or minutes <= 0:
+        minutes = 60
+    minutes = min(minutes, 1440 * 7)  # cap at 7 days
+
+    store = _load_alert_store()
+    for item in store["items"]:
+        if item["id"] == alert_id:
+            _ensure_alert_metadata(item)
+            from datetime import timedelta
+            until = datetime.now(timezone.utc) + timedelta(minutes=minutes)
+            item["snoozed_until"] = until.isoformat()
+            item["updated_at"] = _now_iso()
+            _save_alert_store(store)
+            return JSONResponse(
+                content={
+                    "ok": True, "generated_at": now, "alert_id": alert_id,
+                    "snoozed_until": item["snoozed_until"],
+                    "minutes": minutes,
+                },
+                headers={"Cache-Control": "no-store"},
+            )
+
+    return JSONResponse(
+        content={"ok": False, "error": f"Alert {alert_id} not found"},
+        status_code=404, headers={"Cache-Control": "no-store"},
+    )
+
+
+def build_alert_unsnooze(alert_id: str) -> JSONResponse:
+    """POST /api/v1/strategy-alerts/{id}/unsnooze — clear snooze."""
+    now = _now_iso()
+
+    store = _load_alert_store()
+    for item in store["items"]:
+        if item["id"] == alert_id:
+            _ensure_alert_metadata(item)
+            item["snoozed_until"] = None
+            item["updated_at"] = _now_iso()
+            _save_alert_store(store)
+            return JSONResponse(
+                content={"ok": True, "generated_at": now, "alert_id": alert_id, "snoozed_until": None},
+                headers={"Cache-Control": "no-store"},
+            )
+
+    return JSONResponse(
+        content={"ok": False, "error": f"Alert {alert_id} not found"},
+        status_code=404, headers={"Cache-Control": "no-store"},
+    )

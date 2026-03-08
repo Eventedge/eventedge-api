@@ -1,7 +1,10 @@
-"""SERVER-STRATEGIES-001(A): File-backed strategy CRUD + import/export.
+"""SERVER-STRATEGIES-001/002: File-backed strategy CRUD + import/export + metadata.
 
 Stores strategies in /home/eventedge/alerts/strategies.json.
 Atomic writes via tempfile + rename. No DB required.
+
+v002 additions: description, tags, preferred_regime, template_id/version,
+revision counter, archived flag, archive/unarchive/revisions endpoints.
 """
 from __future__ import annotations
 
@@ -28,6 +31,9 @@ MAX_PAYLOAD_SIZE = 50_000  # bytes when serialized
 
 VALID_PAYLOAD_KEYS = {"asset_defaults", "preset_id", "family_filter", "pinned", "hidden"}
 VALID_SOURCES = {"web", "bot", "import", "api", "template"}
+MAX_TAGS = 10
+MAX_TAG_LEN = 40
+MAX_DESC_LEN = 500
 
 
 # ---------------------------------------------------------------------------
@@ -126,6 +132,31 @@ def _validate_payload(payload: Any) -> str | None:
     return None
 
 
+def _validate_tags(tags: Any) -> list[str]:
+    """Sanitize tags list. Returns cleaned list."""
+    if not isinstance(tags, list):
+        return []
+    cleaned = []
+    for t in tags:
+        if isinstance(t, str) and t.strip():
+            cleaned.append(t.strip()[:MAX_TAG_LEN])
+        if len(cleaned) >= MAX_TAGS:
+            break
+    return cleaned
+
+
+def _ensure_metadata(item: dict) -> dict:
+    """Backfill v002 metadata fields on legacy items (in-place)."""
+    item.setdefault("description", None)
+    item.setdefault("tags", [])
+    item.setdefault("preferred_regime", None)
+    item.setdefault("template_id", item.get("template_id"))
+    item.setdefault("template_version", None)
+    item.setdefault("revision", 1)
+    item.setdefault("archived", False)
+    return item
+
+
 def _validate_name(name: Any) -> str | None:
     if not name or not isinstance(name, str):
         return "name is required"
@@ -143,12 +174,13 @@ def _validate_name(name: Any) -> str | None:
 def build_strategies_list(request: Request) -> JSONResponse:
     """GET /api/v1/strategies — list all strategies."""
     store = _load_store()
+    items = [_ensure_metadata(i) for i in store["items"]]
     return JSONResponse(
         content={
             "ok": True,
             "generated_at": _now_iso(),
-            "count": len(store["items"]),
-            "items": store["items"],
+            "count": len(items),
+            "items": items,
         },
         headers=_cache_headers(),
     )
@@ -159,6 +191,7 @@ def build_strategy_get(request: Request, strategy_id: str) -> JSONResponse:
     store = _load_store()
     for item in store["items"]:
         if item["id"] == strategy_id:
+            _ensure_metadata(item)
             return JSONResponse(
                 content={"ok": True, "generated_at": _now_iso(), "item": item},
                 headers=_cache_headers(),
@@ -219,6 +252,13 @@ async def build_strategy_create(request: Request) -> JSONResponse:
         "updated_at": now,
         "source": source,
         "payload": payload,
+        "description": body.get("description") or None,
+        "tags": _validate_tags(body.get("tags")),
+        "preferred_regime": body.get("preferred_regime") or None,
+        "template_id": body.get("template_id") or None,
+        "template_version": body.get("template_version") or None,
+        "revision": 1,
+        "archived": False,
     }
     store["items"].append(item)
     _save_store(store)
@@ -281,6 +321,18 @@ async def build_strategy_update(request: Request, strategy_id: str) -> JSONRespo
     if "source" in body and body["source"] in VALID_SOURCES:
         target["source"] = body["source"]
 
+    # v002 metadata fields
+    _ensure_metadata(target)
+    if "description" in body:
+        desc = body["description"]
+        target["description"] = desc[:MAX_DESC_LEN] if isinstance(desc, str) else None
+    if "tags" in body:
+        target["tags"] = _validate_tags(body["tags"])
+    if "preferred_regime" in body:
+        target["preferred_regime"] = body["preferred_regime"] if isinstance(body["preferred_regime"], str) else None
+
+    # Increment revision on any update
+    target["revision"] = target.get("revision", 1) + 1
     target["updated_at"] = _now_iso()
     _save_store(store)
 
@@ -356,6 +408,13 @@ async def build_strategy_import(request: Request) -> JSONResponse:
         "updated_at": now,
         "source": "import",
         "payload": payload,
+        "description": body.get("description") or None,
+        "tags": _validate_tags(body.get("tags")),
+        "preferred_regime": None,
+        "template_id": None,
+        "template_version": None,
+        "revision": 1,
+        "archived": False,
     }
     store["items"].append(item)
     _save_store(store)
@@ -372,9 +431,12 @@ def build_strategy_export(strategy_id: str) -> JSONResponse:
     store = _load_store()
     for item in store["items"]:
         if item["id"] == strategy_id:
+            _ensure_metadata(item)
             export = {
                 "name": item["name"],
                 "payload": item["payload"],
+                "description": item.get("description"),
+                "tags": item.get("tags", []),
                 "exported_at": _now_iso(),
                 "source_id": item["id"],
             }
@@ -386,4 +448,78 @@ def build_strategy_export(strategy_id: str) -> JSONResponse:
         content={"ok": False, "generated_at": _now_iso(), "error": f"Strategy {strategy_id} not found"},
         status_code=404,
         headers={"Cache-Control": "no-store"},
+    )
+
+
+# ---------------------------------------------------------------------------
+# Archive / Unarchive
+# ---------------------------------------------------------------------------
+
+def build_strategy_archive(strategy_id: str) -> JSONResponse:
+    """POST /api/v1/strategies/{id}/archive"""
+    store = _load_store()
+    for item in store["items"]:
+        if item["id"] == strategy_id:
+            _ensure_metadata(item)
+            item["archived"] = True
+            item["updated_at"] = _now_iso()
+            _save_store(store)
+            return JSONResponse(
+                content={"ok": True, "generated_at": _now_iso(), "item": item},
+                headers={"Cache-Control": "no-store"},
+            )
+    return JSONResponse(
+        content={"ok": False, "error": f"Strategy {strategy_id} not found"},
+        status_code=404, headers={"Cache-Control": "no-store"},
+    )
+
+
+def build_strategy_unarchive(strategy_id: str) -> JSONResponse:
+    """POST /api/v1/strategies/{id}/unarchive"""
+    store = _load_store()
+    for item in store["items"]:
+        if item["id"] == strategy_id:
+            _ensure_metadata(item)
+            item["archived"] = False
+            item["updated_at"] = _now_iso()
+            _save_store(store)
+            return JSONResponse(
+                content={"ok": True, "generated_at": _now_iso(), "item": item},
+                headers={"Cache-Control": "no-store"},
+            )
+    return JSONResponse(
+        content={"ok": False, "error": f"Strategy {strategy_id} not found"},
+        status_code=404, headers={"Cache-Control": "no-store"},
+    )
+
+
+# ---------------------------------------------------------------------------
+# Revision history (lightweight)
+# ---------------------------------------------------------------------------
+
+def build_strategy_revisions(strategy_id: str) -> JSONResponse:
+    """GET /api/v1/strategies/{id}/revisions — lightweight revision metadata."""
+    store = _load_store()
+    for item in store["items"]:
+        if item["id"] == strategy_id:
+            _ensure_metadata(item)
+            return JSONResponse(
+                content={
+                    "ok": True,
+                    "generated_at": _now_iso(),
+                    "strategy_id": strategy_id,
+                    "name": item["name"],
+                    "revision": item.get("revision", 1),
+                    "created_at": item.get("created_at"),
+                    "updated_at": item.get("updated_at"),
+                    "source": item.get("source"),
+                    "template_id": item.get("template_id"),
+                    "template_version": item.get("template_version"),
+                    "archived": item.get("archived", False),
+                },
+                headers={"Cache-Control": "no-store"},
+            )
+    return JSONResponse(
+        content={"ok": False, "error": f"Strategy {strategy_id} not found"},
+        status_code=404, headers={"Cache-Control": "no-store"},
     )

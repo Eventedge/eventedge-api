@@ -1,18 +1,27 @@
-"""STRATEGY-TEMPLATES-001: Static strategy templates + instantiate flow.
+"""STRATEGY-TEMPLATES-001/002: Static strategy templates + instantiate + recommendations.
 
 Templates are hardcoded for v1. Instantiation creates a normal strategy
 via the strategies module.
+
+v002: enriched templates with recommended_regimes, risk_style, usage_note;
+      recommendations endpoint using current regime + top_families.
 """
 from __future__ import annotations
 
+import json
+import os
 import uuid
 from datetime import datetime, timezone
+from pathlib import Path
 from typing import Any
 
 from fastapi import Request
 from fastapi.responses import JSONResponse
 
-from .strategies import _load_store, _save_store, _validate_name, MAX_STRATEGIES
+from .strategies import (
+    _load_store, _save_store, _validate_name, _validate_tags,
+    _ensure_metadata, MAX_STRATEGIES,
+)
 
 TEMPLATES: list[dict[str, Any]] = [
     {
@@ -31,6 +40,10 @@ TEMPLATES: list[dict[str, Any]] = [
             "recommended_families": [],
             "note": "Good starting point for any market condition.",
         },
+        "recommended_regimes": [],
+        "risk_style": "balanced",
+        "usage_note": "Works in any regime. A neutral starting point before customizing.",
+        "template_quality_note": "No family bias — covers all signals equally.",
     },
     {
         "id": "momentum_workspace",
@@ -48,6 +61,10 @@ TEMPLATES: list[dict[str, Any]] = [
             "recommended_families": ["ta", "derivs"],
             "note": "Best for trend-following regimes.",
         },
+        "recommended_regimes": ["trend_up", "trend_up_highvol", "breakout"],
+        "risk_style": "aggressive",
+        "usage_note": "Best when clear directional trend is established. Avoid in choppy ranges.",
+        "template_quality_note": "Relies heavily on TA scanner + derivatives direction signals.",
     },
     {
         "id": "mean_reversion_workspace",
@@ -65,6 +82,10 @@ TEMPLATES: list[dict[str, Any]] = [
             "recommended_families": ["derivs", "pm"],
             "note": "Best for range-bound or overextended regimes.",
         },
+        "recommended_regimes": ["range_lowvol", "range_highvol", "overextended"],
+        "risk_style": "balanced",
+        "usage_note": "Works best when funding is extreme or OI is stretched. Contrarian by design.",
+        "template_quality_note": "Combines derivatives extremes with prediction market conviction.",
     },
     {
         "id": "defensive_workspace",
@@ -82,6 +103,10 @@ TEMPLATES: list[dict[str, Any]] = [
             "recommended_families": ["quality", "alerts", "macro"],
             "note": "Best during high uncertainty or drawdown regimes.",
         },
+        "recommended_regimes": ["drawdown", "high_uncertainty", "crisis"],
+        "risk_style": "conservative",
+        "usage_note": "Capital preservation focus. Prioritizes data quality and risk-off signals.",
+        "template_quality_note": "Emphasizes system health and macro risk over directional alpha.",
     },
     {
         "id": "macro_workspace",
@@ -99,6 +124,10 @@ TEMPLATES: list[dict[str, Any]] = [
             "recommended_families": ["macro", "pm"],
             "note": "Best when macro catalysts are driving price.",
         },
+        "recommended_regimes": ["macro_driven", "risk_on", "risk_off"],
+        "risk_style": "balanced",
+        "usage_note": "Best when macro events (DXY, rates, ETF flows) dominate price action.",
+        "template_quality_note": "DXY/rates/flow signals combined with prediction market conviction.",
     },
 ]
 
@@ -178,6 +207,7 @@ async def build_template_instantiate(request: Request, template_id: str) -> JSON
         "updated_at": now,
         "source": "template",
         "template_id": template_id,
+        "template_version": "1.0",
         "payload": {
             "asset_defaults": {
                 "asset": defaults.get("asset", "BTC"),
@@ -188,6 +218,11 @@ async def build_template_instantiate(request: Request, template_id: str) -> JSON
             "pinned": defaults.get("pinned", {}),
             "hidden": defaults.get("hidden", {}),
         },
+        "description": tpl.get("description"),
+        "tags": list(tpl.get("rules", {}).get("recommended_families", [])),
+        "preferred_regime": (tpl.get("recommended_regimes") or [None])[0],
+        "revision": 1,
+        "archived": False,
     }
     store["items"].append(item)
     _save_store(store)
@@ -220,6 +255,7 @@ def build_workspace_summary(strategy_id: str) -> JSONResponse:
             headers={"Cache-Control": "no-store"},
         )
 
+    _ensure_metadata(target)
     payload = target.get("payload", {})
     ad = payload.get("asset_defaults", {})
     pinned = payload.get("pinned", {})
@@ -251,6 +287,11 @@ def build_workspace_summary(strategy_id: str) -> JSONResponse:
         "pinned_count": pin_count,
         "hidden_count": hide_count,
         "family_distribution": families,
+        "description": target.get("description"),
+        "tags": target.get("tags", []),
+        "preferred_regime": target.get("preferred_regime"),
+        "revision": target.get("revision", 1),
+        "archived": target.get("archived", False),
     }
 
     if tpl:
@@ -262,5 +303,93 @@ def build_workspace_summary(strategy_id: str) -> JSONResponse:
 
     return JSONResponse(
         content=summary,
+        headers={"Cache-Control": "no-store"},
+    )
+
+
+# ---------------------------------------------------------------------------
+# Template recommendations — rule-based fit scoring
+# ---------------------------------------------------------------------------
+
+ALERTS_DIR = Path(os.getenv("ROUTER_ALERT_DIR", "/home/eventedge/alerts"))
+RELEVANCE_FILE = ALERTS_DIR / "relevance_now.json"
+
+
+def _load_relevance_lite(asset: str, horizon: str) -> tuple[str, list[str]]:
+    """Load current regime + top_families for asset/horizon. Returns (regime, [family_names])."""
+    try:
+        data = json.loads(RELEVANCE_FILE.read_text())
+    except (FileNotFoundError, json.JSONDecodeError, OSError):
+        return "unknown", []
+    asset_data = data.get("assets", {}).get(asset.upper(), {})
+    regime = asset_data.get("regime_bucket", "unknown")
+    h_data = asset_data.get("horizons", {}).get(horizon.lower(), {})
+    top_families = h_data.get("meta", {}).get("top_families", [])
+    family_names = [f.get("family", "") for f in top_families if f.get("family")]
+    return regime, family_names
+
+
+def build_template_recommendations(
+    asset: str = "BTC", horizon: str = "24h",
+) -> JSONResponse:
+    """GET /api/v1/strategy-templates/recommendations — templates ranked by fit."""
+    now = _now_iso()
+    regime, active_families = _load_relevance_lite(asset, horizon)
+
+    scored: list[dict] = []
+    for tpl in TEMPLATES:
+        fit_score = 0.0
+        reasons: list[str] = []
+
+        # Regime match
+        rec_regimes = tpl.get("recommended_regimes", [])
+        if not rec_regimes:
+            fit_score += 0.3
+            reasons.append("universal (any regime)")
+        elif regime in rec_regimes:
+            fit_score += 0.5
+            reasons.append(f"regime match: {regime}")
+        else:
+            # Partial: check if regime bucket starts with any recommended
+            partial = any(regime.startswith(r.split("_")[0]) for r in rec_regimes if r)
+            if partial:
+                fit_score += 0.2
+                reasons.append("partial regime match")
+
+        # Family overlap
+        rec_families = set(tpl.get("rules", {}).get("recommended_families", []))
+        if rec_families and active_families:
+            overlap = rec_families & set(active_families[:5])
+            if overlap:
+                bonus = 0.3 * len(overlap) / max(len(rec_families), 1)
+                fit_score += bonus
+                reasons.append(f"active families: {', '.join(sorted(overlap))}")
+            # Extra boost if recommended family is #1
+            if active_families and active_families[0] in rec_families:
+                fit_score += 0.1
+                reasons.append(f"top family: {active_families[0]}")
+        elif not rec_families:
+            fit_score += 0.15
+            reasons.append("no family bias")
+
+        scored.append({
+            "template": tpl,
+            "fit_score": round(fit_score, 3),
+            "reasons": reasons,
+        })
+
+    scored.sort(key=lambda x: x["fit_score"], reverse=True)
+
+    return JSONResponse(
+        content={
+            "ok": True,
+            "generated_at": now,
+            "asset": asset,
+            "horizon": horizon,
+            "regime": regime,
+            "active_families": active_families[:5],
+            "count": len(scored),
+            "items": scored,
+        },
         headers={"Cache-Control": "no-store"},
     )
