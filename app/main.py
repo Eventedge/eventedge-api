@@ -60,6 +60,10 @@ from .relevance import (
     build_relevance_families,
     build_relevance_presets,
     build_relevance_preset_view,
+    build_relevance_batch,
+    build_relevance_delta,
+    build_relevance_family_filter,
+    build_relevance_explain_lite,
 )
 from .strategies import (
     build_strategies_list,
@@ -488,6 +492,72 @@ def relevance_explain(
     except Exception:
         return JSONResponse(
             content={"ok": False, "generated_at": now_iso(), "error": "Failed to read relevance data"},
+            status_code=200, headers={"Cache-Control": "no-store"},
+        )
+
+
+@app.get("/api/v1/relevance/batch")
+def relevance_batch(
+    request: Request,
+    assets: str | None = Query(None),
+    horizon: str | None = Query(None),
+    day: str | None = Query(None),
+):
+    try:
+        return build_relevance_batch(request, assets=assets, horizon=horizon, day=day)
+    except Exception:
+        return JSONResponse(
+            content={"ok": False, "generated_at": now_iso(), "error": "Failed to build batch"},
+            status_code=200, headers={"Cache-Control": "no-store"},
+        )
+
+
+@app.get("/api/v1/relevance/delta/{asset}")
+def relevance_delta(
+    request: Request,
+    asset: str,
+    horizon: str | None = Query(None),
+    day: str | None = Query(None),
+):
+    try:
+        return build_relevance_delta(request, asset, horizon=horizon, day=day)
+    except Exception:
+        return JSONResponse(
+            content={"ok": False, "generated_at": now_iso(), "error": "Failed to build delta"},
+            status_code=200, headers={"Cache-Control": "no-store"},
+        )
+
+
+@app.get("/api/v1/relevance/explain-lite/{asset}")
+def relevance_explain_lite(
+    request: Request,
+    asset: str,
+    horizon: str | None = Query(None),
+    day: str | None = Query(None),
+    top_k: int | None = Query(None, ge=1, le=50),
+):
+    try:
+        return build_relevance_explain_lite(request, asset, horizon=horizon, day=day, top_k=top_k)
+    except Exception:
+        return JSONResponse(
+            content={"ok": False, "generated_at": now_iso(), "error": "Failed to build explain-lite"},
+            status_code=200, headers={"Cache-Control": "no-store"},
+        )
+
+
+@app.get("/api/v1/relevance/{asset}/family/{family}")
+def relevance_family_filter(
+    request: Request,
+    asset: str,
+    family: str,
+    horizon: str | None = Query(None),
+    day: str | None = Query(None),
+):
+    try:
+        return build_relevance_family_filter(request, asset, family, horizon=horizon, day=day)
+    except Exception:
+        return JSONResponse(
+            content={"ok": False, "generated_at": now_iso(), "error": "Failed to filter by family"},
             status_code=200, headers={"Cache-Control": "no-store"},
         )
 

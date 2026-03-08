@@ -634,3 +634,343 @@ def build_relevance_preset_view(
         "family_distribution": _family_distribution(features),
     }
     return JSONResponse(content=result, headers=_cache_headers(etag, mtime))
+
+
+# ---------------------------------------------------------------------------
+# AGENT-RELEVANCE-API-003: batch, delta, family-filtered, explain-lite
+# ---------------------------------------------------------------------------
+
+def build_relevance_batch(
+    request: Request,
+    assets: str | None = None,
+    horizon: str | None = None,
+    day: str | None = None,
+) -> JSONResponse:
+    """Batched endpoint: compact slices for multiple assets in one call.
+
+    GET /api/v1/relevance/batch?assets=BTC,ETH,SOL&horizon=24h
+    """
+    now = datetime.now(timezone.utc)
+    rfile = _resolve_file(day)
+    etag = _file_etag(rfile)
+    mtime = _file_mtime_dt(rfile)
+
+    cached = _check_conditional(request, etag, mtime)
+    if cached:
+        return cached
+
+    data, err = _load_relevance(day)
+    if err:
+        return _error_response(now, err)
+
+    if assets:
+        asset_list = [a.strip().upper() for a in assets.split(",") if a.strip()]
+    else:
+        asset_list = sorted(VALID_ASSETS)
+
+    invalid = [a for a in asset_list if a not in VALID_ASSETS]
+    if invalid:
+        return _error_response(now, f"Unknown assets: {invalid}. Valid: {sorted(VALID_ASSETS)}")
+
+    h = (horizon or "24h").lower()
+    if h not in VALID_HORIZONS:
+        return _error_response(now, f"Unknown horizon: {horizon}. Valid: {sorted(VALID_HORIZONS)}")
+
+    slices: dict[str, Any] = {}
+    for asset_upper in asset_list:
+        asset_data = data.get("assets", {}).get(asset_upper)
+        if not asset_data:
+            slices[asset_upper] = {"error": "no data"}
+            continue
+
+        h_data = asset_data.get("horizons", {}).get(h, {})
+        top = h_data.get("top", [])
+        meta = h_data.get("meta", {})
+        top_families = meta.get("top_families", [])
+
+        compact_features = []
+        for item in top:
+            entry: dict[str, Any] = {
+                "feature_id": item.get("feature_id"),
+                "family": item.get("family", ""),
+                "rank": item.get("rank"),
+                "score": item.get("score"),
+                "badge": item.get("badge"),
+            }
+            if item.get("perf"):
+                entry["perf"] = {
+                    "hit_rate": item["perf"].get("hit_rate"),
+                    "avg_return": item["perf"].get("avg_return"),
+                    "n": item["perf"].get("n"),
+                }
+            compact_features.append(entry)
+
+        slices[asset_upper] = {
+            "regime_bucket": asset_data.get("regime_bucket"),
+            "scoring_mode": meta.get("scoring_mode", data.get("scoring_mode")),
+            "n_features": len(compact_features),
+            "features": compact_features,
+            "top_families": [
+                {"family": tf.get("family"), "family_score": tf.get("family_score")}
+                for tf in top_families
+            ] if top_families else [],
+        }
+
+    result: dict[str, Any] = {
+        "ok": True,
+        "generated_at": now.isoformat(),
+        "snapshot_age_s": _snapshot_age(data),
+        **_file_meta(rfile),
+        "horizon": h,
+        "day": data.get("day"),
+        "assets": slices,
+    }
+    return JSONResponse(content=result, headers=_cache_headers(etag, mtime))
+
+
+def build_relevance_delta(
+    request: Request,
+    asset: str,
+    horizon: str | None = None,
+    day: str | None = None,
+) -> JSONResponse:
+    """Delta endpoint: compare today vs yesterday for an asset+horizon.
+
+    Returns added/dropped/movers, top_families delta, regime/scoring changes.
+    Uses dated snapshots on disk — no DB.
+    """
+    now = datetime.now(timezone.utc)
+    rfile = _resolve_file(day)
+    etag = _file_etag(rfile)
+    mtime = _file_mtime_dt(rfile)
+
+    cached = _check_conditional(request, etag, mtime)
+    if cached:
+        return cached
+
+    asset_upper = asset.upper()
+    if asset_upper not in VALID_ASSETS:
+        return _error_response(now, f"Unknown asset: {asset}. Valid: {sorted(VALID_ASSETS)}")
+
+    h = (horizon or "24h").lower()
+    if h not in VALID_HORIZONS:
+        return _error_response(now, f"Unknown horizon: {horizon}. Valid: {sorted(VALID_HORIZONS)}")
+
+    data_today, err = _load_relevance(day)
+    if err:
+        return _error_response(now, err)
+
+    today_day = data_today.get("day", day or now.strftime("%Y-%m-%d"))
+
+    from datetime import timedelta
+    try:
+        today_dt = datetime.strptime(today_day, "%Y-%m-%d")
+        yesterday_day = (today_dt - timedelta(days=1)).strftime("%Y-%m-%d")
+    except ValueError:
+        yesterday_day = None
+
+    data_yesterday = None
+    yesterday_available = False
+    if yesterday_day:
+        data_yesterday, _ = _load_relevance(yesterday_day)
+        yesterday_available = data_yesterday is not None
+
+    today_asset = data_today.get("assets", {}).get(asset_upper, {})
+    today_horizon_data = today_asset.get("horizons", {}).get(h, {})
+    today_top = today_horizon_data.get("top", [])
+    today_meta = today_horizon_data.get("meta", {})
+    today_regime = today_asset.get("regime_bucket", "unknown")
+    today_scoring = today_meta.get("scoring_mode", data_today.get("scoring_mode", "unknown"))
+    today_families = today_meta.get("top_families", [])
+
+    yesterday_asset = (data_yesterday or {}).get("assets", {}).get(asset_upper, {})
+    yesterday_horizon_data = yesterday_asset.get("horizons", {}).get(h, {})
+    yesterday_top = yesterday_horizon_data.get("top", [])
+    yesterday_meta = yesterday_horizon_data.get("meta", {})
+    yesterday_regime = yesterday_asset.get("regime_bucket", "unknown")
+    yesterday_scoring = yesterday_meta.get("scoring_mode",
+                                            (data_yesterday or {}).get("scoring_mode", "unknown"))
+    yesterday_families = yesterday_meta.get("top_families", [])
+
+    today_fids = {f["feature_id"]: f for f in today_top if "feature_id" in f}
+    yesterday_fids = {f["feature_id"]: f for f in yesterday_top if "feature_id" in f}
+
+    added = [
+        {"feature_id": fid, "rank": f.get("rank"), "score": f.get("score"), "family": f.get("family")}
+        for fid, f in today_fids.items() if fid not in yesterday_fids
+    ]
+    dropped = [
+        {"feature_id": fid, "rank": f.get("rank"), "score": f.get("score"), "family": f.get("family")}
+        for fid, f in yesterday_fids.items() if fid not in today_fids
+    ]
+
+    movers = []
+    for fid in today_fids:
+        if fid in yesterday_fids:
+            today_rank = today_fids[fid].get("rank", 0) or 0
+            yesterday_rank = yesterday_fids[fid].get("rank", 0) or 0
+            rank_delta = yesterday_rank - today_rank
+            if abs(rank_delta) >= 1:
+                movers.append({
+                    "feature_id": fid,
+                    "rank": today_rank,
+                    "rank_delta": rank_delta,
+                    "family": today_fids[fid].get("family"),
+                })
+
+    today_fam_map = {tf.get("family"): tf for tf in today_families}
+    yesterday_fam_map = {tf.get("family"): tf for tf in yesterday_families}
+    all_fams = set(today_fam_map.keys()) | set(yesterday_fam_map.keys())
+
+    family_delta = []
+    for fam in sorted(all_fams):
+        today_f = today_fam_map.get(fam)
+        yesterday_f = yesterday_fam_map.get(fam)
+        fd: dict[str, Any] = {"family": fam}
+        if today_f and yesterday_f:
+            fd["score_today"] = today_f.get("family_score")
+            fd["score_yesterday"] = yesterday_f.get("family_score")
+            fd["score_delta"] = round(
+                (today_f.get("family_score") or 0) - (yesterday_f.get("family_score") or 0), 4
+            )
+            fd["status"] = "changed"
+        elif today_f:
+            fd["score_today"] = today_f.get("family_score")
+            fd["status"] = "new"
+        else:
+            fd["score_yesterday"] = yesterday_f.get("family_score") if yesterday_f else None
+            fd["status"] = "dropped"
+        family_delta.append(fd)
+
+    result: dict[str, Any] = {
+        "ok": True,
+        "generated_at": now.isoformat(),
+        "snapshot_age_s": _snapshot_age(data_today),
+        **_file_meta(rfile),
+        "asset": asset_upper,
+        "horizon": h,
+        "today": today_day,
+        "yesterday": yesterday_day,
+        "yesterday_available": yesterday_available,
+        "regime": {
+            "today": today_regime,
+            "yesterday": yesterday_regime if yesterday_available else None,
+            "changed": today_regime != yesterday_regime if yesterday_available else None,
+        },
+        "scoring_mode": {
+            "today": today_scoring,
+            "yesterday": yesterday_scoring if yesterday_available else None,
+            "changed": today_scoring != yesterday_scoring if yesterday_available else None,
+        },
+        "added": added,
+        "dropped": dropped,
+        "movers": movers,
+        "family_delta": family_delta,
+        "summary": {
+            "n_added": len(added),
+            "n_dropped": len(dropped),
+            "n_movers": len(movers),
+            "regime_changed": today_regime != yesterday_regime if yesterday_available else None,
+            "scoring_mode_changed": today_scoring != yesterday_scoring if yesterday_available else None,
+        },
+    }
+    return JSONResponse(content=result, headers=_cache_headers(etag, mtime))
+
+
+def build_relevance_family_filter(
+    request: Request,
+    asset: str,
+    family: str,
+    horizon: str | None = None,
+    day: str | None = None,
+) -> JSONResponse:
+    """Family-filtered endpoint: only that family's features + family summary.
+
+    GET /api/v1/relevance/{asset}/family/{family}?horizon=...
+    """
+    now = datetime.now(timezone.utc)
+    if family.lower() not in VALID_FAMILIES:
+        return _error_response(now, f"Unknown family: {family}. Valid: {sorted(VALID_FAMILIES)}")
+    return build_relevance_explain(request, asset, horizon=horizon, day=day, family=family)
+
+
+def build_relevance_explain_lite(
+    request: Request,
+    asset: str,
+    horizon: str | None = None,
+    day: str | None = None,
+    top_k: int | None = None,
+) -> JSONResponse:
+    """Compact, machine-friendly explain response for agents.
+
+    GET /api/v1/relevance/explain-lite/{asset}?horizon=...&top_k=10
+    """
+    now = datetime.now(timezone.utc)
+    rfile = _resolve_file(day)
+    etag = _file_etag(rfile)
+    mtime = _file_mtime_dt(rfile)
+
+    cached = _check_conditional(request, etag, mtime)
+    if cached:
+        return cached
+
+    data, err = _load_relevance(day)
+    if err:
+        return _error_response(now, err)
+
+    asset_upper = asset.upper()
+    if asset_upper not in VALID_ASSETS:
+        return _error_response(now, f"Unknown asset: {asset}. Valid: {sorted(VALID_ASSETS)}")
+
+    asset_data = data.get("assets", {}).get(asset_upper)
+    if not asset_data:
+        return _error_response(now, f"No data for asset {asset_upper}")
+
+    h = (horizon or "24h").lower()
+    if h not in VALID_HORIZONS:
+        return _error_response(now, f"Unknown horizon: {horizon}. Valid: {sorted(VALID_HORIZONS)}")
+
+    h_data = asset_data.get("horizons", {}).get(h, {})
+    top = h_data.get("top", [])
+    meta = h_data.get("meta", {})
+
+    k = top_k or 10
+    features_lite = []
+    for item in top[:k]:
+        entry: dict[str, Any] = {
+            "feature_id": item.get("feature_id"),
+            "score": item.get("score"),
+            "family": item.get("family", ""),
+        }
+        perf = item.get("perf")
+        if perf:
+            entry["perf"] = {
+                "hit_rate": perf.get("hit_rate"),
+                "avg_return": perf.get("avg_return"),
+                "n": perf.get("n"),
+            }
+        why = item.get("why", "")
+        entry["reason_short"] = why[:80] if why else ""
+        features_lite.append(entry)
+
+    top_families = meta.get("top_families", [])
+    families_lite = [
+        {
+            "family": tf.get("family"),
+            "score": tf.get("family_score"),
+            "direction": tf.get("boost_direction", "neutral"),
+        }
+        for tf in top_families
+    ]
+
+    result: dict[str, Any] = {
+        "ok": True,
+        "asset": asset_upper,
+        "horizon": h,
+        "day": data.get("day"),
+        "regime": asset_data.get("regime_bucket"),
+        "scoring_mode": meta.get("scoring_mode", data.get("scoring_mode")),
+        "top_features": features_lite,
+        "top_families": families_lite,
+    }
+    return JSONResponse(content=result, headers=_cache_headers(etag, mtime))
