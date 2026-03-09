@@ -45,6 +45,12 @@ from .telemetry_ops_health import (
     build_telemetry_ops_cost,
     build_telemetry_relevance_drift,
 )
+from .user_profiles import (
+    build_profile_get,
+    build_profile_update,
+    build_personalized_relevance,
+    build_personalized_preset_relevance,
+)
 from .simlab import build_simlab_overview, build_simlab_trades_live
 from .supercard import build_supercard
 from .snapshots import (
@@ -1137,6 +1143,64 @@ def paper_summary():
             "disclaimer": "Fallback placeholder. Paper tables unavailable.",
         }
         return json_with_cache(payload, "public, s-maxage=15, stale-while-revalidate=120")
+
+
+# ---- PERSONALIZATION-001 / RISK-PROFILE-001: User profiles + personalized relevance ----
+
+@app.get("/api/v1/user-profiles/{user_id}")
+def user_profile_get(user_id: str):
+    try:
+        return build_profile_get(user_id)
+    except Exception:
+        return JSONResponse(
+            content={"ok": False, "generated_at": now_iso(), "error": "Failed to read profile"},
+            status_code=200, headers={"Cache-Control": "no-store"},
+        )
+
+
+@app.put("/api/v1/user-profiles/{user_id}")
+async def user_profile_update(request: Request, user_id: str):
+    try:
+        body = await request.json()
+        return build_profile_update(user_id, body)
+    except Exception:
+        return JSONResponse(
+            content={"ok": False, "generated_at": now_iso(), "error": "Failed to update profile"},
+            status_code=200, headers={"Cache-Control": "no-store"},
+        )
+
+
+@app.get("/api/v1/relevance/personalized/{user_id}/{asset}")
+def relevance_personalized(
+    user_id: str,
+    asset: str,
+    horizon: str | None = Query(None),
+    day: str | None = Query(None),
+):
+    try:
+        return build_personalized_relevance(user_id, asset, horizon=horizon, day=day)
+    except Exception:
+        return JSONResponse(
+            content={"ok": False, "generated_at": now_iso(), "error": "Failed to build personalized relevance"},
+            status_code=200, headers={"Cache-Control": "no-store"},
+        )
+
+
+@app.get("/api/v1/relevance/personalized/{user_id}/{asset}/preset/{preset_id}")
+def relevance_personalized_preset(
+    user_id: str,
+    asset: str,
+    preset_id: str,
+    horizon: str | None = Query(None),
+    day: str | None = Query(None),
+):
+    try:
+        return build_personalized_preset_relevance(user_id, asset, preset_id, horizon=horizon, day=day)
+    except Exception:
+        return JSONResponse(
+            content={"ok": False, "generated_at": now_iso(), "error": "Failed to build personalized preset relevance"},
+            status_code=200, headers={"Cache-Control": "no-store"},
+        )
 
 
 @app.get("/api/v1/simlab/overview")
