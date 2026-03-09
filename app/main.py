@@ -40,6 +40,11 @@ from .admin_alert_health import build_alert_health
 from .telemetry_pm_health import build_telemetry_pm_health
 from .telemetry_chartfeed import build_telemetry_chartfeed
 from .telemetry_health_summary import build_health_summary
+from .telemetry_ops_health import (
+    build_telemetry_relevance_health,
+    build_telemetry_ops_cost,
+    build_telemetry_relevance_drift,
+)
 from .simlab import build_simlab_overview, build_simlab_trades_live
 from .supercard import build_supercard
 from .snapshots import (
@@ -362,6 +367,44 @@ def admin_telemetry_health_summary():
     except Exception:
         return JSONResponse(
             content={"ok": False, "generated_at": now_iso(), "error": "Failed to build health summary"},
+            status_code=200, headers={"Cache-Control": "no-store"},
+        )
+
+
+# ---- OPS-RELEVANCE-HEALTH-003 / OPS-COST-001: Ops telemetry ----
+
+@app.get("/api/v1/admin/telemetry/relevance_health")
+def admin_telemetry_relevance_health():
+    try:
+        payload = build_telemetry_relevance_health()
+        return json_with_cache(payload, "no-store")
+    except Exception:
+        return JSONResponse(
+            content={"ok": False, "generated_at": now_iso(), "error": "Failed to read relevance health"},
+            status_code=200, headers={"Cache-Control": "no-store"},
+        )
+
+
+@app.get("/api/v1/admin/telemetry/ops_cost")
+def admin_telemetry_ops_cost():
+    try:
+        payload = build_telemetry_ops_cost()
+        return json_with_cache(payload, "no-store")
+    except Exception:
+        return JSONResponse(
+            content={"ok": False, "generated_at": now_iso(), "error": "Failed to read ops cost"},
+            status_code=200, headers={"Cache-Control": "no-store"},
+        )
+
+
+@app.get("/api/v1/admin/telemetry/relevance_drift")
+def admin_telemetry_relevance_drift():
+    try:
+        payload = build_telemetry_relevance_drift()
+        return json_with_cache(payload, "no-store")
+    except Exception:
+        return JSONResponse(
+            content={"ok": False, "generated_at": now_iso(), "error": "Failed to read relevance drift"},
             status_code=200, headers={"Cache-Control": "no-store"},
         )
 
