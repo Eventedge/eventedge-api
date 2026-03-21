@@ -1243,3 +1243,68 @@ def alerts_live(limit: int = 50):
     except Exception:
         payload = {"ok": True, "version": "v0.1-live", "source_ts": now_iso(), "items": []}
         return json_with_cache(payload, "public, s-maxage=5, stale-while-revalidate=30")
+
+
+# ── Workstation Workspace Persistence ──
+
+from app.workstation_workspace import get_workspace, put_workspace, workspace_health
+
+@app.get("/api/v1/workstation/workspace")
+def workstation_workspace_get():
+    return get_workspace()
+
+@app.put("/api/v1/workstation/workspace")
+async def workstation_workspace_put(request: Request):
+    return await put_workspace(request)
+
+@app.get("/api/v1/workstation/workspace/health")
+def workstation_workspace_health():
+    return workspace_health()
+
+# ── Workstation Skill Files Persistence ──
+
+from app.workstation_skill_files import get_skill_files, put_skill_files
+
+@app.get("/api/v1/workstation/skill-files")
+def workstation_skill_files_get():
+    return get_skill_files()
+
+@app.put("/api/v1/workstation/skill-files")
+async def workstation_skill_files_put(request: Request):
+    return await put_skill_files(request)
+
+# ── Workstation Evaluator Signals ──
+
+from app.workstation_evaluator_signals import post_evaluator_signals, get_evaluator_signals
+
+@app.post("/api/v1/workstation/evaluator-signals")
+async def workstation_evaluator_signals_post(request: Request):
+    return await post_evaluator_signals(request)
+
+@app.get("/api/v1/workstation/evaluator-signals")
+def workstation_evaluator_signals_get(limit: int = 50, category: str | None = None):
+    return get_evaluator_signals(limit, category)
+
+# ── Workstation Evaluator Proposals ──
+
+from app.workstation_evaluator_proposals import get_evaluator_proposals, put_evaluator_proposals
+
+@app.get("/api/v1/workstation/evaluator-proposals")
+def workstation_evaluator_proposals_get():
+    return get_evaluator_proposals()
+
+@app.put("/api/v1/workstation/evaluator-proposals")
+async def workstation_evaluator_proposals_put(request: Request):
+    return await put_evaluator_proposals(request)
+
+# ── Workstation Persistent Patterns ──
+
+from app.workstation_patterns import get_patterns, put_patterns
+
+@app.get("/api/v1/workstation/patterns")
+def workstation_patterns_get():
+    return get_patterns()
+
+@app.put("/api/v1/workstation/patterns")
+async def workstation_patterns_put(request: Request):
+    return await put_patterns(request)
