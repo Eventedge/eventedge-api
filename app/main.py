@@ -1308,3 +1308,15 @@ def workstation_patterns_get():
 @app.put("/api/v1/workstation/patterns")
 async def workstation_patterns_put(request: Request):
     return await put_patterns(request)
+
+# ── Workstation Proposal Outcome Attribution ──
+
+from app.workstation_proposal_outcomes import get_proposal_outcomes, put_proposal_outcomes
+
+@app.get("/api/v1/workstation/proposal-outcomes")
+def workstation_proposal_outcomes_get():
+    return get_proposal_outcomes()
+
+@app.put("/api/v1/workstation/proposal-outcomes")
+async def workstation_proposal_outcomes_put(request: Request):
+    return await put_proposal_outcomes(request)
