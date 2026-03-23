@@ -1320,3 +1320,35 @@ def workstation_proposal_outcomes_get():
 @app.put("/api/v1/workstation/proposal-outcomes")
 async def workstation_proposal_outcomes_put(request: Request):
     return await put_proposal_outcomes(request)
+
+# ── Workstation Recommendation History ──
+
+from app.workstation_recommendation_history import get_recommendation_history, put_recommendation_history
+
+@app.get("/api/v1/workstation/recommendation-history")
+def workstation_recommendation_history_get():
+    return get_recommendation_history()
+
+@app.put("/api/v1/workstation/recommendation-history")
+async def workstation_recommendation_history_put(request: Request):
+    return await put_recommendation_history(request)
+
+# ── Workstation Watch Conditions ──
+
+from app.workstation_watch_conditions import get_watch_conditions, put_watch_conditions
+
+@app.get("/api/v1/workstation/watch-conditions")
+def workstation_watch_conditions_get():
+    return get_watch_conditions()
+
+@app.put("/api/v1/workstation/watch-conditions")
+async def workstation_watch_conditions_put(request: Request):
+    return await put_watch_conditions(request)
+
+# ── Workstation Watch Condition Evaluation (Bundle 63) ──
+
+from app.workstation_watch_evaluate import evaluate_watch_conditions
+
+@app.post("/api/v1/workstation/watch-conditions/evaluate")
+async def workstation_watch_evaluate():
+    return await evaluate_watch_conditions()
