@@ -258,7 +258,7 @@ def _evaluate_regime_shift(cond: dict, regime: dict[str, str]) -> dict | None:
 
 # ── TTL Expiry ──
 
-def _expire_conditions(conditions: list[dict]) -> int:
+def _expire_conditions(conditions: list[dict], audit_fn=None) -> int:
     """Mark active conditions as expired if past TTL. Returns count expired."""
     now_ms = datetime.now(timezone.utc).timestamp() * 1000
     expired = 0
@@ -275,6 +275,14 @@ def _expire_conditions(conditions: list[dict]) -> int:
             c["status"] = "expired"
             c["updatedAt"] = _now_iso()
             expired += 1
+            # B68: Audit log — watch_expired
+            if audit_fn:
+                audit_fn(
+                    "watch_expired",
+                    {"type": c.get("type"), "summary": c.get("summary", ""), "ttlHours": ttl_hours},
+                    condition_id=c.get("conditionId"),
+                    asset=c.get("asset"),
+                )
     return expired
 
 
@@ -289,8 +297,11 @@ async def evaluate_watch_conditions():
     store = _load_conditions()
     conditions = store.get("conditions", [])
 
+    # B68: Audit log for alert events
+    from app.workstation_audit_log import append_audit_event
+
     # Run expiry first
-    expired_count = _expire_conditions(conditions)
+    expired_count = _expire_conditions(conditions, audit_fn=append_audit_event)
 
     # Filter active conditions by type
     active = [c for c in conditions if c.get("status") == "active"]
@@ -384,12 +395,27 @@ async def evaluate_watch_conditions():
                 "referenceValue": result.get("referenceValue"),
             }
             triggered_ids.append(cond["conditionId"])
-            trigger_details.append({
+            detail = {
                 "conditionId": cond["conditionId"],
                 "type": cond_type,
                 "asset": cond["asset"],
                 "reason": result["reason"],
-            })
+            }
+            trigger_details.append(detail)
+            # B68: Audit log — watch_triggered
+            append_audit_event(
+                "watch_triggered",
+                {
+                    "type": cond_type,
+                    "reason": result["reason"],
+                    "summary": cond.get("summary", ""),
+                    "source": cond.get("source", ""),
+                    "currentValue": result.get("currentValue"),
+                    "referenceValue": result.get("referenceValue"),
+                },
+                condition_id=cond["conditionId"],
+                asset=cond["asset"],
+            )
 
     # Save if anything changed
     if triggered_ids or expired_count > 0:

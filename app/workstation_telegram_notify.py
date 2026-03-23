@@ -142,6 +142,9 @@ async def send_triggered_notifications(
 
     sent_count = 0
 
+    # B68: Audit log for delivery events
+    from app.workstation_audit_log import append_audit_event
+
     async with httpx.AsyncClient() as client:
         for cid in new_ids:
             detail = detail_map.get(cid)
@@ -150,6 +153,7 @@ async def send_triggered_notifications(
 
             condition = cond_map.get(cid)
             text = _format_message(detail, condition)
+            asset = detail.get("asset")
 
             try:
                 r = await client.post(
@@ -166,7 +170,12 @@ async def send_triggered_notifications(
                 if r.status_code == 200 and resp.get("ok"):
                     sent_ids.add(cid)
                     sent_count += 1
-                    logger.info("Telegram notify: sent %s (%s %s)", cid, detail.get("asset"), detail.get("type"))
+                    logger.info("Telegram notify: sent %s (%s %s)", cid, asset, detail.get("type"))
+                    append_audit_event(
+                        "delivery_sent",
+                        {"channel": "telegram", "type": detail.get("type"), "reason": detail.get("reason", "")},
+                        condition_id=cid, asset=asset,
+                    )
                 elif resp.get("parameters", {}).get("migrate_to_chat_id"):
                     # Chat upgraded to supergroup — retry with new ID
                     new_chat = str(resp["parameters"]["migrate_to_chat_id"])
@@ -180,12 +189,32 @@ async def send_triggered_notifications(
                         sent_ids.add(cid)
                         sent_count += 1
                         logger.info("Telegram notify: sent %s via migrated chat", cid)
+                        append_audit_event(
+                            "delivery_sent",
+                            {"channel": "telegram", "type": detail.get("type"), "reason": detail.get("reason", ""), "migrated": True},
+                            condition_id=cid, asset=asset,
+                        )
                     else:
                         logger.warning("Telegram notify: failed %s after migration — %s", cid, r2.text[:200])
+                        append_audit_event(
+                            "delivery_failed",
+                            {"channel": "telegram", "error": r2.text[:200], "type": detail.get("type")},
+                            condition_id=cid, asset=asset,
+                        )
                 else:
                     logger.warning("Telegram notify: failed %s — %d %s", cid, r.status_code, r.text[:200])
+                    append_audit_event(
+                        "delivery_failed",
+                        {"channel": "telegram", "error": r.text[:200], "status": r.status_code, "type": detail.get("type")},
+                        condition_id=cid, asset=asset,
+                    )
             except Exception as e:
                 logger.warning("Telegram notify: error sending %s — %s", cid, e)
+                append_audit_event(
+                    "delivery_failed",
+                    {"channel": "telegram", "error": str(e), "type": detail.get("type")},
+                    condition_id=cid, asset=asset,
+                )
 
     # Persist sent IDs
     _save_sent_ids(sent_ids)

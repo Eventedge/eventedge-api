@@ -1352,3 +1352,15 @@ from app.workstation_watch_evaluate import evaluate_watch_conditions
 @app.post("/api/v1/workstation/watch-conditions/evaluate")
 async def workstation_watch_evaluate():
     return await evaluate_watch_conditions()
+
+# ── Workstation Audit Log (Bundle 68) ──
+
+from app.workstation_audit_log import get_audit_log, post_audit_event
+
+@app.get("/api/v1/workstation/audit-log")
+def workstation_audit_log_get(limit: int = 50, category: str | None = None):
+    return get_audit_log(limit, category)
+
+@app.post("/api/v1/workstation/audit-log")
+async def workstation_audit_log_post(request: Request):
+    return await post_audit_event(request)
