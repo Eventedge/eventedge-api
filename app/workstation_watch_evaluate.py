@@ -398,11 +398,21 @@ async def evaluate_watch_conditions():
     evaluated_count = len(evaluable)
     triggered_count = len(triggered_ids)
 
+    # B67: Deliver triggered conditions via Telegram
     if triggered_count > 0:
         logger.info(
             "Watch eval: %d evaluated, %d triggered (%s)",
             evaluated_count, triggered_count, ", ".join(triggered_ids),
         )
+        try:
+            from app.workstation_telegram_notify import send_triggered_notifications
+            sent = await send_triggered_notifications(
+                triggered_ids, trigger_details, conditions,
+            )
+            if sent > 0:
+                logger.info("Watch eval: %d Telegram notification(s) sent", sent)
+        except Exception as e:
+            logger.warning("Watch eval: Telegram notify failed — %s", e)
 
     return JSONResponse(content={
         "ok": True,
