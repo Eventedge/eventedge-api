@@ -1364,3 +1364,16 @@ def workstation_audit_log_get(limit: int = 50, category: str | None = None):
 @app.post("/api/v1/workstation/audit-log")
 async def workstation_audit_log_post(request: Request):
     return await post_audit_event(request)
+
+
+# ── Workstation: Thresholds (B69) ──
+
+from app.workstation_thresholds import get_thresholds, post_thresholds
+
+@app.get("/api/v1/workstation/thresholds")
+async def workstation_thresholds_get(request: Request):
+    return await get_thresholds(request)
+
+@app.post("/api/v1/workstation/thresholds")
+async def workstation_thresholds_post(request: Request):
+    return await post_thresholds(request)
