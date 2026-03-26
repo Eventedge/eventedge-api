@@ -1355,7 +1355,7 @@ async def workstation_watch_evaluate():
 
 # ── Workstation Audit Log (Bundle 68) ──
 
-from app.workstation_audit_log import get_audit_log, post_audit_event
+from app.workstation_audit_log import get_audit_log, post_audit_event, get_audit_summary, get_fatigue_analysis, prune_audit_log
 
 @app.get("/api/v1/workstation/audit-log")
 def workstation_audit_log_get(limit: int = 50, category: str | None = None):
@@ -1365,6 +1365,17 @@ def workstation_audit_log_get(limit: int = 50, category: str | None = None):
 async def workstation_audit_log_post(request: Request):
     return await post_audit_event(request)
 
+@app.get("/api/v1/workstation/audit-log/summary")
+def workstation_audit_summary_get(hours: int = 24):
+    return get_audit_summary(hours)
+
+@app.get("/api/v1/workstation/audit-log/fatigue")
+def workstation_audit_fatigue_get(hours: int = 24):
+    return get_fatigue_analysis(hours)
+
+@app.post("/api/v1/workstation/audit-log/prune")
+async def workstation_audit_prune(request: Request):
+    return await prune_audit_log(request)
 
 # ── Workstation: Thresholds (B69) ──
 
