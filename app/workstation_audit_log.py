@@ -13,18 +13,24 @@ Bundle 76: Adds retention/pruning so the log stays bounded.
 Policy: keep last 14 days. Auto-prune triggers when file exceeds 2MB.
 Explicit prune endpoint for manual/cron use.
 
+Bundle 77: Adds per-asset/per-category drilldown, fatigue mutation audit,
+and condition effectiveness scoring baseline.
+
 Event categories:
   - watch_triggered: A watch condition evaluated to true
   - watch_expired: A watch condition expired by TTL
   - delivery_sent: Telegram notification successfully delivered
   - delivery_failed: Telegram notification failed
   - significant_change: A significant market change was detected
+  - fatigue_mutation: Operator applied a fatigue-driven threshold/profile change
 
 Endpoints:
   GET /api/v1/workstation/audit-log?limit=50&category=...
   GET /api/v1/workstation/audit-log/summary?hours=24
   GET /api/v1/workstation/audit-log/fatigue?hours=24
   POST /api/v1/workstation/audit-log/prune — explicit retention prune
+  GET /api/v1/workstation/audit-log/drilldown?asset=BTC&category=L1&hours=24
+  GET /api/v1/workstation/audit-log/effectiveness?hours=48
 """
 from __future__ import annotations
 
@@ -50,6 +56,18 @@ VALID_CATEGORIES = {
     "delivery_sent",
     "delivery_failed",
     "significant_change",
+    "fatigue_mutation",
+}
+
+# Asset → category mapping (mirrors client-side asset-coverage.ts)
+ASSET_CATEGORIES: dict[str, str] = {
+    "BTC": "L1", "ETH": "L1", "SOL": "L1", "AVAX": "L1", "ADA": "L1",
+    "SUI": "L1", "NEAR": "L1", "SEI": "L1",
+    "ARB": "L2", "OP": "L2",
+    "AAVE": "DeFi", "UNI": "DeFi", "INJ": "DeFi",
+    "DOGE": "Meme", "PEPE": "Meme", "WIF": "Meme",
+    "LINK": "Infra", "TIA": "Infra",
+    "BNB": "Exchange", "HYPE": "Exchange",
 }
 
 
@@ -226,7 +244,7 @@ def _get_stats() -> dict[str, Any]:
 # ── Endpoints ──
 
 # Categories accepted via POST from clients (subset — delivery/trigger are server-only)
-CLIENT_CATEGORIES = {"significant_change"}
+CLIENT_CATEGORIES = {"significant_change", "fatigue_mutation"}
 
 
 async def post_audit_event(request: Request):
@@ -605,3 +623,325 @@ async def prune_audit_log(request: Request):
 
     result = _prune_to_retention(retention)
     return JSONResponse(content=result)
+
+
+# ── Per-Asset / Per-Category Drilldown (Bundle 77) ──
+
+
+def _get_asset_category(asset: str) -> str | None:
+    """Look up category for an asset symbol."""
+    return ASSET_CATEGORIES.get(asset.upper()) if asset else None
+
+
+def _get_category_assets(category: str) -> list[str]:
+    """Get all assets in a category."""
+    cat_upper = category.upper()
+    # Normalize common aliases
+    cat_map = {"L1": "L1", "L2": "L2", "DEFI": "DeFi", "MEME": "Meme",
+               "INFRA": "Infra", "EXCHANGE": "Exchange"}
+    normalized = cat_map.get(cat_upper, category)
+    return [a for a, c in ASSET_CATEGORIES.items() if c == normalized]
+
+
+def get_alert_drilldown(
+    asset: str | None = None,
+    category: str | None = None,
+    hours: int = 24,
+):
+    """GET /api/v1/workstation/audit-log/drilldown — per-asset or per-category cuts.
+
+    Supports:
+      ?asset=BTC&hours=24 — all audit events for BTC
+      ?category=Meme&hours=24 — all audit events for Meme assets
+      ?hours=48 — category-level breakdown (no filter)
+
+    Returns per-entity trigger/expire/delivery counts, condition types,
+    noisy conditions, and recent events.
+    """
+    hours = min(hours, 168)
+    events = _read_all_within(hours)
+
+    # Filter events by asset or category
+    if asset:
+        asset = asset.upper()
+        filtered = [e for e in events if (e.get("asset") or "").upper() == asset]
+        scope_label = asset
+        scope_category = _get_asset_category(asset)
+    elif category:
+        cat_assets = set(_get_category_assets(category))
+        filtered = [e for e in events if (e.get("asset") or "").upper() in cat_assets]
+        scope_label = category
+        scope_category = category
+    else:
+        filtered = events
+        scope_label = "all"
+        scope_category = None
+
+    if not filtered:
+        # Build category breakdown even when no filtered results
+        cat_breakdown = _build_category_breakdown(events) if not asset and not category else {}
+        return JSONResponse(content={
+            "window_hours": hours,
+            "scope": scope_label,
+            "scope_category": scope_category,
+            "total_events": 0,
+            "category_counts": {},
+            "condition_types": {},
+            "noisy_conditions": [],
+            "recent_events": [],
+            "category_breakdown": cat_breakdown,
+        })
+
+    # Category counts for filtered events
+    cat_counts: dict[str, int] = {}
+    for evt in filtered:
+        c = evt.get("category", "unknown")
+        cat_counts[c] = cat_counts.get(c, 0) + 1
+
+    # Condition type counts (from triggers)
+    ctype_counts: dict[str, int] = {}
+    cond_fire_map: dict[str, int] = {}
+    cond_asset_map: dict[str, str] = {}
+    cond_type_map: dict[str, str] = {}
+    for evt in filtered:
+        if evt.get("category") == "watch_triggered":
+            payload = evt.get("payload", {})
+            ct = payload.get("conditionType", "unknown")
+            ctype_counts[ct] = ctype_counts.get(ct, 0) + 1
+            cid = evt.get("conditionId")
+            if cid:
+                cond_fire_map[cid] = cond_fire_map.get(cid, 0) + 1
+                cond_asset_map[cid] = evt.get("asset", "")
+                cond_type_map[cid] = ct
+
+    # Noisy conditions (2+ fires)
+    noisy = [
+        {
+            "conditionId": cid,
+            "fires": count,
+            "asset": cond_asset_map.get(cid),
+            "conditionType": cond_type_map.get(cid),
+        }
+        for cid, count in sorted(cond_fire_map.items(), key=lambda x: -x[1])
+        if count >= 2
+    ][:10]
+
+    # Recent events (last 10)
+    recent = []
+    for evt in reversed(filtered):
+        if len(recent) >= 10:
+            break
+        recent.append({
+            "ts": evt.get("ts"),
+            "category": evt.get("category"),
+            "asset": evt.get("asset"),
+            "conditionId": evt.get("conditionId"),
+            "summary": (evt.get("payload") or {}).get("reason")
+                or (evt.get("payload") or {}).get("summary")
+                or (evt.get("payload") or {}).get("error")
+                or (evt.get("payload") or {}).get("action"),
+        })
+
+    # Delivery health for this scope
+    sent = cat_counts.get("delivery_sent", 0)
+    failed = cat_counts.get("delivery_failed", 0)
+    total_del = sent + failed
+    del_rate = round(sent / total_del, 3) if total_del > 0 else None
+
+    # Category breakdown (when no filter — shows which categories generate most)
+    cat_breakdown = _build_category_breakdown(events) if not asset else {}
+
+    return JSONResponse(content={
+        "window_hours": hours,
+        "scope": scope_label,
+        "scope_category": scope_category,
+        "total_events": len(filtered),
+        "category_counts": cat_counts,
+        "condition_types": ctype_counts,
+        "delivery_health": {"sent": sent, "failed": failed, "rate": del_rate},
+        "noisy_conditions": noisy,
+        "recent_events": recent,
+        "category_breakdown": cat_breakdown,
+    })
+
+
+def _build_category_breakdown(events: list[dict[str, Any]]) -> dict[str, Any]:
+    """Build per-category trigger/expire counts from all events."""
+    cat_triggers: dict[str, int] = {}
+    cat_expired: dict[str, int] = {}
+    cat_total: dict[str, int] = {}
+
+    for evt in events:
+        asset = (evt.get("asset") or "").upper()
+        cat = ASSET_CATEGORIES.get(asset)
+        if not cat:
+            continue
+        cat_total[cat] = cat_total.get(cat, 0) + 1
+        if evt.get("category") == "watch_triggered":
+            cat_triggers[cat] = cat_triggers.get(cat, 0) + 1
+        elif evt.get("category") == "watch_expired":
+            cat_expired[cat] = cat_expired.get(cat, 0) + 1
+
+    result = {}
+    for cat in sorted(cat_total, key=lambda c: -cat_total[c]):
+        result[cat] = {
+            "total_events": cat_total[cat],
+            "triggers": cat_triggers.get(cat, 0),
+            "expired": cat_expired.get(cat, 0),
+        }
+    return result
+
+
+# ── Condition Effectiveness Scoring (Bundle 77) ──
+
+
+def get_condition_effectiveness(hours: int = 48):
+    """GET /api/v1/workstation/audit-log/effectiveness — condition quality baseline.
+
+    Deterministic scoring of each condition seen in the audit window:
+      - fire_count: how many times it triggered
+      - delivered: how many triggers led to successful delivery
+      - expired_unused: whether it expired without ever triggering
+      - refire_rate: fires per 24h (normalized)
+      - effectiveness: "useful" | "noisy" | "wasted" | "unknown"
+
+    A condition is:
+      - "useful":  1-2 fires with good delivery, or single decisive trigger
+      - "noisy":   3+ fires in window (rapid refire pattern)
+      - "wasted":  expired without any trigger
+      - "unknown": too few events to score
+
+    Also provides asset-level and category-level quality summaries.
+    """
+    hours = min(hours, 168)
+    events = _read_all_within(hours)
+
+    if not events:
+        return JSONResponse(content={
+            "window_hours": hours,
+            "total_conditions": 0,
+            "conditions": [],
+            "asset_quality": {},
+            "category_quality": {},
+            "summary": {"useful": 0, "noisy": 0, "wasted": 0, "unknown": 0},
+        })
+
+    # Index events by conditionId
+    cond_triggers: dict[str, list[dict]] = {}
+    cond_deliveries: dict[str, int] = {}
+    cond_failures: dict[str, int] = {}
+    cond_expired: set[str] = set()
+    cond_assets: dict[str, str] = {}
+    cond_types: dict[str, str] = {}
+    cond_first_ts: dict[str, str] = {}
+    cond_last_ts: dict[str, str] = {}
+
+    for evt in events:
+        cid = evt.get("conditionId")
+        if not cid:
+            continue
+        cat = evt.get("category")
+        ts = evt.get("ts", "")
+
+        # Track first/last seen
+        if cid not in cond_first_ts or ts < cond_first_ts[cid]:
+            cond_first_ts[cid] = ts
+        if cid not in cond_last_ts or ts > cond_last_ts[cid]:
+            cond_last_ts[cid] = ts
+
+        if cat == "watch_triggered":
+            cond_triggers.setdefault(cid, []).append(evt)
+            if evt.get("asset"):
+                cond_assets[cid] = evt["asset"]
+            payload = evt.get("payload", {})
+            if payload.get("conditionType"):
+                cond_types[cid] = payload["conditionType"]
+        elif cat == "delivery_sent":
+            cond_deliveries[cid] = cond_deliveries.get(cid, 0) + 1
+            if evt.get("asset"):
+                cond_assets[cid] = evt["asset"]
+        elif cat == "delivery_failed":
+            cond_failures[cid] = cond_failures.get(cid, 0) + 1
+        elif cat == "watch_expired":
+            cond_expired.add(cid)
+            if evt.get("asset"):
+                cond_assets[cid] = evt["asset"]
+
+    # Score each condition
+    all_cids = set(cond_triggers) | cond_expired | set(cond_deliveries) | set(cond_failures)
+    conditions: list[dict[str, Any]] = []
+    summary = {"useful": 0, "noisy": 0, "wasted": 0, "unknown": 0}
+
+    for cid in all_cids:
+        fires = len(cond_triggers.get(cid, []))
+        delivered = cond_deliveries.get(cid, 0)
+        failed = cond_failures.get(cid, 0)
+        expired = cid in cond_expired
+        asset = cond_assets.get(cid)
+        ctype = cond_types.get(cid, "unknown")
+
+        # Normalized refire rate (fires per 24h)
+        refire_rate = round(fires * 24 / max(hours, 1), 2) if fires > 0 else 0
+
+        # Effectiveness classification
+        if fires == 0 and expired:
+            effectiveness = "wasted"
+        elif fires >= 3:
+            effectiveness = "noisy"
+        elif fires >= 1 and fires <= 2:
+            effectiveness = "useful"
+        else:
+            effectiveness = "unknown"
+
+        conditions.append({
+            "conditionId": cid,
+            "asset": asset,
+            "category": ASSET_CATEGORIES.get((asset or "").upper()),
+            "conditionType": ctype,
+            "fires": fires,
+            "delivered": delivered,
+            "failed": failed,
+            "expired": expired,
+            "refire_rate": refire_rate,
+            "effectiveness": effectiveness,
+        })
+        summary[effectiveness] = summary.get(effectiveness, 0) + 1
+
+    # Sort: noisy first, then wasted, then useful, then unknown
+    eff_order = {"noisy": 0, "wasted": 1, "useful": 2, "unknown": 3}
+    conditions.sort(key=lambda c: (eff_order.get(c["effectiveness"], 9), -c["fires"]))
+
+    # Asset-level quality
+    asset_quality: dict[str, dict[str, int]] = {}
+    for c in conditions:
+        a = c.get("asset")
+        if not a:
+            continue
+        aq = asset_quality.setdefault(a, {"useful": 0, "noisy": 0, "wasted": 0, "total": 0})
+        aq["total"] += 1
+        eff = c["effectiveness"]
+        if eff in aq:
+            aq[eff] += 1
+
+    # Category-level quality
+    category_quality: dict[str, dict[str, int]] = {}
+    for c in conditions:
+        cat = c.get("category")
+        if not cat:
+            continue
+        cq = category_quality.setdefault(cat, {"useful": 0, "noisy": 0, "wasted": 0, "total": 0})
+        cq["total"] += 1
+        eff = c["effectiveness"]
+        if eff in cq:
+            cq[eff] += 1
+
+    return JSONResponse(content={
+        "window_hours": hours,
+        "total_conditions": len(conditions),
+        "conditions": conditions[:30],  # cap at top 30
+        "asset_quality": dict(sorted(asset_quality.items(),
+                                      key=lambda x: -(x[1].get("noisy", 0) + x[1].get("wasted", 0)))),
+        "category_quality": dict(sorted(category_quality.items(),
+                                         key=lambda x: -(x[1].get("noisy", 0) + x[1].get("wasted", 0)))),
+        "summary": summary,
+    })
